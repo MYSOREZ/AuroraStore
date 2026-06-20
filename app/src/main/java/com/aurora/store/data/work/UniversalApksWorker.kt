@@ -31,7 +31,7 @@ import com.aurora.gplayapi.data.models.App
 import com.aurora.gplayapi.data.models.PlayFile
 import com.aurora.gplayapi.helpers.PurchaseHelper
 import com.aurora.gplayapi.network.IHttpClient
-import com.aurora.store.Constants
+import com.aurora.Constants
 import com.aurora.store.R
 import com.aurora.store.data.AccountRepository
 import com.aurora.store.data.model.AccountType
