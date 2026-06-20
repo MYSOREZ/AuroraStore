@@ -46,6 +46,7 @@ import java.util.Properties
 import java.util.zip.Deflater
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
+import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -82,6 +83,7 @@ class UniversalApksWorker @AssistedInject constructor(
 
         private const val NOTIFICATION_ID_FGS = 601
         private const val NOTIFICATION_ID_RESULT = 602
+        private const val NOTIFICATION_ID_PROGRESS = 603
 
         private const val BUFFER_SIZE = 256 * 1024
 
@@ -138,7 +140,22 @@ class UniversalApksWorker @AssistedInject constructor(
     private val displayName by lazy { inputData.getString(DISPLAY_NAME) ?: packageName }
 
     override suspend fun doWork(): Result {
-        setForeground(buildForegroundInfo(context.getString(R.string.universal_apks_gathering)))
+        return try {
+            runJob()
+        } catch (exception: CancellationException) {
+            throw exception
+        } catch (exception: Exception) {
+            // Never die silently: surface the reason so the user knows what happened.
+            Log.e(TAG, "Universal APKS job crashed for $packageName", exception)
+            notifyResult(success = false, errorMessage = exception.message)
+            Result.failure()
+        }
+    }
+
+    private suspend fun runJob(): Result {
+        enterForeground(context.getString(R.string.universal_apks_gathering))
+        // FGS notification is silent/ongoing and easy to miss; post a visible one too.
+        notifyProgress(context.getString(R.string.universal_apks_gathering))
 
         // Step 1: Collect unique files across all device configs
         val collectedFiles = LinkedHashMap<String, PlayFile>()
@@ -196,11 +213,15 @@ class UniversalApksWorker @AssistedInject constructor(
         val downloadDir = File(context.cacheDir, "Downloads/$packageName/$versionCode/universal")
             .also { it.mkdirs() }
 
-        setForeground(buildForegroundInfo(context.getString(R.string.universal_apks_downloading)))
+        enterForeground(context.getString(R.string.universal_apks_downloading))
 
         val downloadedFiles = mutableListOf<File>()
+        val total = collectedFiles.size
+        var index = 0
         for (playFile in collectedFiles.values) {
             if (isStopped) break
+            index++
+            notifyProgress(context.getString(R.string.universal_apks_downloading) + " ($index/$total)")
             runCatching {
                 val localFile = downloadFile(playFile, downloadDir)
                 if (localFile != null) downloadedFiles.add(localFile)
@@ -216,7 +237,8 @@ class UniversalApksWorker @AssistedInject constructor(
         }
 
         // Step 3: Bundle into .apks ZIP
-        setForeground(buildForegroundInfo(context.getString(R.string.universal_apks_bundling)))
+        enterForeground(context.getString(R.string.universal_apks_bundling))
+        notifyProgress(context.getString(R.string.universal_apks_bundling))
 
         val outputDir = context.getExternalFilesDir("UniversalApks")?.also { it.mkdirs() }
             ?: run {
@@ -347,6 +369,17 @@ class UniversalApksWorker @AssistedInject constructor(
             }
         }
 
+    /**
+     * Best-effort foreground promotion. Starting a foreground service from the background is
+     * restricted on Android 12+, and an expedited job downgraded to regular background work
+     * (see [OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST]) may hit that restriction.
+     * A failure here is non-fatal — the job keeps running and still produces a result.
+     */
+    private suspend fun enterForeground(message: String) {
+        runCatching { setForeground(buildForegroundInfo(message)) }
+            .onFailure { Log.w(TAG, "Could not enter foreground: ${it.message}") }
+    }
+
     private fun buildForegroundInfo(message: String): ForegroundInfo {
         val notification = NotificationCompat.Builder(context, Constants.NOTIFICATION_CHANNEL_EXPORT)
             .setSmallIcon(R.drawable.ic_notification_outlined)
@@ -363,8 +396,24 @@ class UniversalApksWorker @AssistedInject constructor(
         }
     }
 
-    private fun notifyResult(success: Boolean, outputFile: File? = null) {
+    /**
+     * Posts a visible, ongoing progress notification on its own id. Independent of the silent
+     * foreground notification so the user gets clear feedback even if foreground promotion failed.
+     */
+    private fun notifyProgress(message: String) {
+        val notification = NotificationCompat.Builder(context, Constants.NOTIFICATION_CHANNEL_EXPORT)
+            .setSmallIcon(R.drawable.ic_notification_outlined)
+            .setContentTitle(displayName)
+            .setContentText(message)
+            .setProgress(0, 0, true)
+            .setOngoing(true)
+            .build()
+        notificationManager.notify(NOTIFICATION_ID_PROGRESS, notification)
+    }
+
+    private fun notifyResult(success: Boolean, outputFile: File? = null, errorMessage: String? = null) {
         notificationManager.cancel(NOTIFICATION_ID_FGS)
+        notificationManager.cancel(NOTIFICATION_ID_PROGRESS)
 
         val builder = NotificationCompat.Builder(context, Constants.NOTIFICATION_CHANNEL_EXPORT)
             .setSmallIcon(R.drawable.ic_notification_outlined)
@@ -397,7 +446,10 @@ class UniversalApksWorker @AssistedInject constructor(
                 pendingShare
             )
         } else {
-            builder.setContentText(context.getString(R.string.universal_apks_notification_failed))
+            val failed = context.getString(R.string.universal_apks_notification_failed)
+            val text = if (!errorMessage.isNullOrBlank()) "$failed: $errorMessage" else failed
+            builder.setContentText(text)
+            builder.setStyle(NotificationCompat.BigTextStyle().bigText(text))
         }
 
         notificationManager.notify(NOTIFICATION_ID_RESULT, builder.build())
