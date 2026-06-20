@@ -193,6 +193,10 @@ fun AppDetailsScreen(
                     onDownloadWith = { requestedApp, accountId ->
                         viewModel.enqueueDownloadWith(requestedApp, accountId)
                     },
+                    onUniversalApks = { requestedApp ->
+                        viewModel.enqueueUniversalApks(requestedApp)
+                        context.toast(R.string.universal_apks_gathering)
+                    },
                     onFavorite = { viewModel.toggleFavourite(loadedApp) },
                     onCancelDownload = { viewModel.cancelDownload(loadedApp) },
                     onUninstall = { AppInstaller.uninstall(context, packageName) },
@@ -300,6 +304,7 @@ private fun ScreenContentApp(
     accounts: List<Account> = emptyList(),
     onDownload: (requestedApp: App) -> Unit = {},
     onDownloadWith: (requestedApp: App, accountId: String) -> Unit = { _, _ -> },
+    onUniversalApks: (requestedApp: App) -> Unit = {},
     onFavorite: () -> Unit = {},
     onCancelDownload: () -> Unit = {},
     onUninstall: () -> Unit = {},
@@ -405,6 +410,8 @@ private fun ScreenContentApp(
                 MenuItem.MANUAL_DOWNLOAD -> {
                     showExtraPane(ExtraScreen.ManualDownload)
                 }
+
+                MenuItem.UNIVERSAL_APKS -> onUniversalApks(app)
 
                 MenuItem.INSTALL_OTHER_ACCOUNT -> {
                     showAccountPicker = true

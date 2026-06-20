@@ -31,6 +31,7 @@ import com.aurora.store.data.AccountRepository
 import com.aurora.store.data.event.AuthEvent
 import com.aurora.store.data.event.InstallerEvent
 import com.aurora.store.data.helper.DownloadHelper
+import com.aurora.store.data.work.UniversalApksWorker
 import com.aurora.store.data.model.AppState
 import com.aurora.store.data.model.DownloadStatus
 import com.aurora.store.data.model.ExodusReport
@@ -334,6 +335,13 @@ class AppDetailsViewModel @Inject constructor(
 
     fun enqueueDownloadWith(app: App, accountId: String) {
         viewModelScope.launch(Dispatchers.IO) { downloadHelper.enqueueApp(app, accountId) }
+    }
+
+    fun enqueueUniversalApks(app: App) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val accountId = accountRepository.resolveAccountId(app.packageName)
+            UniversalApksWorker.enqueue(context, app, accountId)
+        }
     }
 
     fun cancelDownload(app: App) {
