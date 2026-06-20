@@ -85,6 +85,11 @@ fun AppDetailsMenu(
                 enabled = canManualDownload && !state.inProgress()
             )
             DropdownMenuItem(
+                text = { Text(text = stringResource(R.string.action_download_universal_apks)) },
+                onClick = { onClick(MenuItem.UNIVERSAL_APKS) },
+                enabled = !state.inProgress()
+            )
+            DropdownMenuItem(
                 text = { Text(text = stringResource(R.string.action_switch_account)) },
                 onClick = { onClick(MenuItem.INSTALL_OTHER_ACCOUNT) },
                 enabled = canUseOtherAccount && !state.inProgress()

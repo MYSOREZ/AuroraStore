@@ -349,6 +349,12 @@
     <string name="title_updates">"Updates"</string>
     <string name="title_advanced">"Advanced"</string>
     <string name="title_manual_download">"Manual download"</string>
+    <string name="action_download_universal_apks">Download Universal APKS</string>
+    <string name="universal_apks_gathering">Gathering split information…</string>
+    <string name="universal_apks_downloading">Downloading splits…</string>
+    <string name="universal_apks_bundling">Bundling APKS…</string>
+    <string name="universal_apks_notification_complete">Universal APKS ready — tap Share to export</string>
+    <string name="universal_apks_notification_failed">Universal APKS download failed</string>
     <string name="toast_anonymous_restriction">"Not available on anonymous accounts"</string>
     <string name="toast_apk_blacklisted">"Blacklisted"</string>
     <string name="toast_apk_whitelisted">"Whitelisted"</string>

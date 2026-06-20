@@ -33,6 +33,7 @@ import com.aurora.store.R
 import com.aurora.store.data.AccountRepository
 import com.aurora.store.data.model.AccountType
 import com.aurora.store.data.model.Auth
+import java.util.Properties
 import com.aurora.store.data.room.account.Account
 import com.aurora.store.util.Preferences
 import com.aurora.store.util.Preferences.PREFERENCE_AUTH_DATA
@@ -108,6 +109,54 @@ class AuthProvider @Inject constructor(
      * Checks whether saved AuthData is valid or not
      */
     fun isSavedAuthDataValid(): Boolean = AuthHelper.isValid(authData!!)
+
+    /**
+     * Builds a temporary [AuthData] for [accountId] using custom device [properties], without
+     * persisting it. Used by [com.aurora.store.data.work.UniversalApksWorker] to authenticate
+     * multiple virtual device configurations in one session.
+     *
+     * For anonymous accounts this calls the dispenser — may throw if rate-limited.
+     * For Google accounts this re-authenticates with the same AAS token but new device props.
+     */
+    suspend fun buildAuthDataWithProperties(
+        accountId: String,
+        properties: Properties
+    ): AuthData = withContext(Dispatchers.IO) {
+        val account = accountRepository.getById(accountId)
+            ?: throw IllegalStateException("No account $accountId")
+        when (account.type) {
+            AccountType.GOOGLE -> {
+                val token = account.aasToken
+                    ?: throw IllegalStateException("No AAS token for account $accountId")
+                AuthHelper.build(
+                    email = account.email,
+                    token = token,
+                    tokenType = account.tokenType,
+                    properties = properties,
+                    locale = spoofProvider.locale
+                )
+            }
+            AccountType.ANONYMOUS -> {
+                val dispenserUrl = dispenserURL
+                    ?: throw IllegalStateException("No dispenser URL configured")
+                val playResponse = httpClient.postAuth(
+                    dispenserUrl,
+                    json.encodeToString(properties).toByteArray()
+                ).also {
+                    if (!it.isSuccessful) throwError(it, context)
+                }
+                val auth = json.decodeFromString<Auth>(String(playResponse.responseBytes))
+                AuthHelper.build(
+                    email = auth.email,
+                    token = auth.auth,
+                    tokenType = AuthHelper.Token.AUTH,
+                    isAnonymous = true,
+                    properties = properties,
+                    locale = spoofProvider.locale
+                )
+            }
+        }
+    }
 
     /**
      * Builds [AuthData] for login using personal Google account
