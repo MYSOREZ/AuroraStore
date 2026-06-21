@@ -93,6 +93,11 @@ class UniversalApksWorker @AssistedInject constructor(
         private const val ACCOUNT_ID = "ACCOUNT_ID"
         private const val DISPLAY_NAME = "DISPLAY_NAME"
         private const val ICON_URL = "ICON_URL"
+        // User-selected config (comma-separated strings / boolean)
+        private const val SELECTED_ABIS = "SELECTED_ABIS"
+        private const val SELECTED_DENSITIES = "SELECTED_DENSITIES"
+        private const val SELECTED_LOCALES = "SELECTED_LOCALES"
+        private const val INCLUDE_DFS = "INCLUDE_DFS"
 
         private const val NOTIFICATION_ID_FGS = 601
         private const val NOTIFICATION_ID_RESULT = 602
@@ -109,24 +114,27 @@ class UniversalApksWorker @AssistedInject constructor(
         private const val DOWNLOAD_MAX_RETRIES = 3
         private const val DOWNLOAD_RETRY_DELAY_MS = 4000L
 
-        // Target ABIs and densities for universal coverage
-        private val TARGET_ABIS = listOf(
-            "arm64-v8a",
-            "armeabi-v7a",
-            "x86_64",
-            "x86",
-            "armeabi"
-        )
-        private val TARGET_DENSITIES = listOf(
-            640,  // xxxhdpi
-            480,  // xxhdpi
-            320,  // xhdpi
-            240,  // hdpi
-            160,  // mdpi
-            120   // ldpi
+        // Full lists used when building configs for each ABI / density sweep.
+        // Only the user-selected subset is actually attempted.
+        private val ALL_ABIS = listOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86", "armeabi")
+        private val ALL_DENSITIES = listOf(640, 480, 320, 240, 160, 120, 213)
+
+        // Mapping from density dpi to the label used in split file names
+        // (e.g. 640 → "xxxhdpi" → "config.xxxhdpi.apk")
+        private val DENSITY_LABEL = mapOf(
+            640 to "xxxhdpi", 480 to "xxhdpi", 320 to "xhdpi",
+            240 to "hdpi", 160 to "mdpi", 120 to "ldpi", 213 to "tvdpi"
         )
 
-        fun enqueue(context: Context, app: App, accountId: String) {
+        fun enqueue(
+            context: Context,
+            app: App,
+            accountId: String,
+            selectedAbis: Set<String> = setOf("arm64-v8a", "armeabi-v7a"),
+            selectedDensities: Set<Int> = ALL_DENSITIES.toSet(),
+            selectedLocales: Set<String> = setOf("en"),
+            includeDynamicFeatures: Boolean = true
+        ) {
             val data = Data.Builder()
                 .putString(PACKAGE_NAME, app.packageName)
                 .putLong(VERSION_CODE, app.versionCode)
@@ -134,6 +142,10 @@ class UniversalApksWorker @AssistedInject constructor(
                 .putString(ACCOUNT_ID, accountId)
                 .putString(DISPLAY_NAME, app.displayName)
                 .putString(ICON_URL, app.iconArtwork.url)
+                .putString(SELECTED_ABIS, selectedAbis.joinToString(","))
+                .putString(SELECTED_DENSITIES, selectedDensities.joinToString(","))
+                .putString(SELECTED_LOCALES, selectedLocales.joinToString(","))
+                .putBoolean(INCLUDE_DFS, includeDynamicFeatures)
                 .build()
 
             val request = OneTimeWorkRequestBuilder<UniversalApksWorker>()
@@ -160,6 +172,21 @@ class UniversalApksWorker @AssistedInject constructor(
     private val accountId by lazy { inputData.getString(ACCOUNT_ID)!! }
     private val displayName by lazy { inputData.getString(DISPLAY_NAME) ?: packageName }
     private val iconUrl by lazy { inputData.getString(ICON_URL).orEmpty() }
+    // User's selected config (falls back to sensible defaults if not present)
+    private val selectedAbis by lazy {
+        inputData.getString(SELECTED_ABIS)?.split(",")?.filter { it.isNotBlank() }?.toSet()
+            ?: setOf("arm64-v8a", "armeabi-v7a")
+    }
+    private val selectedDensities by lazy {
+        inputData.getString(SELECTED_DENSITIES)?.split(",")
+            ?.mapNotNull { it.trim().toIntOrNull() }?.toSet()
+            ?: ALL_DENSITIES.toSet()
+    }
+    private val selectedLocales by lazy {
+        inputData.getString(SELECTED_LOCALES)?.split(",")?.filter { it.isNotBlank() }?.toSet()
+            ?: emptySet()
+    }
+    private val includeDfs by lazy { inputData.getBoolean(INCLUDE_DFS, true) }
 
     override suspend fun doWork(): Result {
         return try {
@@ -201,37 +228,27 @@ class UniversalApksWorker @AssistedInject constructor(
             } else {
                 purchaseHelper.purchase(packageName, versionCode, offerType)
             }
-            files.filter { it.url.isNotBlank() }.forEach { collectedFiles[it.name] = it }
-            Log.i(TAG, "Config 0 (saved): got ${files.size} files, ${collectedFiles.size} with URLs")
+            files.filter { it.url.isNotBlank() }
+                .filter { includeDfs || !it.name.startsWith("df_") }
+                .forEach { collectedFiles[it.name] = it }
+            Log.i(TAG, "Config 0 (saved): got ${files.size} files, ${collectedFiles.size} collected")
         }.onFailure { Log.w(TAG, "Config 0 (saved) failed: ${it.message}") }
 
-        // Subsequent purchases: one per ABI config (all at max density to also catch xxxhdpi)
+        // Subsequent purchases: one per selected ABI (at max density), then density sweep.
         val baseProps = NativeDeviceInfoProvider.getNativeDeviceProperties(context)
         val isAnonymous = accountRepository.getById(accountId)?.type == AccountType.ANONYMOUS
 
-        for (abi in TARGET_ABIS) {
+        for (abi in ALL_ABIS.filter { it in selectedAbis }) {
             if (isStopped) break
-            collectForConfig(
-                collectedFiles,
-                baseProps,
-                abi = abi,
-                density = 640,
-                isAnonymous = isAnonymous
-            )
+            collectForConfig(collectedFiles, baseProps, abi = abi, density = 640, isAnonymous = isAnonymous)
             if (isAnonymous) delay(DISPENSER_DELAY_MS)
         }
 
-        // Density sweep: arm64-v8a at each density to catch remaining density-specific splits
-        for (density in TARGET_DENSITIES) {
+        // Density sweep: use first selected ABI at each non-640 selected density
+        val sweepAbi = selectedAbis.firstOrNull { it in ALL_ABIS } ?: "arm64-v8a"
+        for (density in ALL_DENSITIES.filter { it in selectedDensities && it != 640 }) {
             if (isStopped) break
-            if (density == 640) continue
-            collectForConfig(
-                collectedFiles,
-                baseProps,
-                abi = "arm64-v8a",
-                density = density,
-                isAnonymous = isAnonymous
-            )
+            collectForConfig(collectedFiles, baseProps, abi = sweepAbi, density = density, isAnonymous = isAnonymous)
             if (isAnonymous) delay(DISPENSER_DELAY_MS)
         }
 
@@ -374,6 +391,14 @@ class UniversalApksWorker @AssistedInject constructor(
             val props = (baseProps.clone() as Properties).apply {
                 setProperty("Platforms", abi)
                 setProperty("Screen.Density", density.toString())
+                // Augment the locale list with user-requested locales so the purchase
+                // response includes locale-specific splits for those languages.
+                if (selectedLocales.isNotEmpty()) {
+                    val existing = getProperty("Locales", "")
+                        .split(",").filter { it.isNotBlank() }.toMutableSet()
+                    existing.addAll(selectedLocales)
+                    setProperty("Locales", existing.joinToString(","))
+                }
             }
             val authData = authProvider.buildAuthDataWithProperties(accountId, props)
             val purchaseHelper = PurchaseHelper(authData).using(httpClient)
@@ -386,6 +411,7 @@ class UniversalApksWorker @AssistedInject constructor(
                 purchaseHelper.purchase(packageName, versionCode, offerType)
             }
             val newFiles = files.filter { it.url.isNotBlank() }
+                .filter { includeDfs || !it.name.startsWith("df_") }
                 .filterNot { collected.containsKey(it.name) }
             newFiles.forEach { collected[it.name] = it }
             Log.i(TAG, "Config $label: got ${files.size} files, ${newFiles.size} new")

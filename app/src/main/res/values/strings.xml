@@ -350,6 +350,11 @@
     <string name="title_advanced">"Advanced"</string>
     <string name="title_manual_download">"Manual download"</string>
     <string name="action_download_universal_apks">Download Universal APKS</string>
+    <string name="universal_apks_section_architecture">Architecture</string>
+    <string name="universal_apks_section_density">Screen Density</string>
+    <string name="universal_apks_section_locales">Locales</string>
+    <string name="universal_apks_section_extras">Extras</string>
+    <string name="universal_apks_include_dynamic_features">Include dynamic feature modules (df_*)</string>
     <string name="universal_apks_gathering">Gathering split information…</string>
     <string name="universal_apks_downloading">Downloading splits…</string>
     <string name="universal_apks_bundling">Bundling APKS…</string>

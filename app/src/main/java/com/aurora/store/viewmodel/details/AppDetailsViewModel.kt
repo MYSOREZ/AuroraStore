@@ -337,10 +337,19 @@ class AppDetailsViewModel @Inject constructor(
         viewModelScope.launch(Dispatchers.IO) { downloadHelper.enqueueApp(app, accountId) }
     }
 
-    fun enqueueUniversalApks(app: App) {
+    fun enqueueUniversalApks(
+        app: App,
+        abis: Set<String>,
+        densities: Set<Int>,
+        locales: Set<String>,
+        includeDynamicFeatures: Boolean
+    ) {
         viewModelScope.launch(Dispatchers.IO) {
             val accountId = accountRepository.resolveAccountId(app.packageName)
-            UniversalApksWorker.enqueue(context, app, accountId)
+            UniversalApksWorker.enqueue(
+                context, app, accountId,
+                abis, densities, locales, includeDynamicFeatures
+            )
         }
     }
 

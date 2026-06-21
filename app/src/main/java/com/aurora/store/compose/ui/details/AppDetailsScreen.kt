@@ -81,6 +81,7 @@ import com.aurora.store.compose.preview.ThemePreviewProvider
 import com.aurora.store.compose.ui.commons.ForceRestartDialog
 import com.aurora.store.compose.ui.commons.PermissionRationaleScreen
 import com.aurora.store.compose.ui.details.composable.Actions
+import com.aurora.store.compose.ui.details.composable.UniversalApksConfigSheet
 import com.aurora.store.compose.ui.details.composable.Changelog
 import com.aurora.store.compose.ui.details.composable.Compatibility
 import com.aurora.store.compose.ui.details.composable.DataSafety
@@ -193,8 +194,8 @@ fun AppDetailsScreen(
                     onDownloadWith = { requestedApp, accountId ->
                         viewModel.enqueueDownloadWith(requestedApp, accountId)
                     },
-                    onUniversalApks = { requestedApp ->
-                        viewModel.enqueueUniversalApks(requestedApp)
+                    onUniversalApks = { requestedApp, abis, densities, locales, includeDfs ->
+                        viewModel.enqueueUniversalApks(requestedApp, abis, densities, locales, includeDfs)
                         context.toast(R.string.universal_apks_gathering)
                     },
                     onFavorite = { viewModel.toggleFavourite(loadedApp) },
@@ -304,7 +305,7 @@ private fun ScreenContentApp(
     accounts: List<Account> = emptyList(),
     onDownload: (requestedApp: App) -> Unit = {},
     onDownloadWith: (requestedApp: App, accountId: String) -> Unit = { _, _ -> },
-    onUniversalApks: (requestedApp: App) -> Unit = {},
+    onUniversalApks: (requestedApp: App, abis: Set<String>, densities: Set<Int>, locales: Set<String>, includeDfs: Boolean) -> Unit = { _, _, _, _, _ -> },
     onFavorite: () -> Unit = {},
     onCancelDownload: () -> Unit = {},
     onUninstall: () -> Unit = {},
@@ -339,6 +340,7 @@ private fun ScreenContentApp(
         .scaffoldValue[SupportingPaneScaffoldRole.Supporting] == PaneAdaptedValue.Hidden
     var showRestartDialog by remember { mutableStateOf(false) }
     var showAccountPicker by remember { mutableStateOf(false) }
+    var showUniversalApksSheet by remember { mutableStateOf(false) }
 
     if (showRestartDialog) {
         ForceRestartDialog(onConfirm = onForceRestart)
@@ -396,6 +398,16 @@ private fun ScreenContentApp(
         )
     }
 
+    if (showUniversalApksSheet) {
+        UniversalApksConfigSheet(
+            onDismiss = { showUniversalApksSheet = false },
+            onDownload = { abis, densities, locales, includeDfs ->
+                showUniversalApksSheet = false
+                onUniversalApks(app, abis, densities, locales, includeDfs)
+            }
+        )
+    }
+
     @Composable
     fun SetupMenu() {
         AppDetailsMenu(
@@ -411,7 +423,7 @@ private fun ScreenContentApp(
                     showExtraPane(ExtraScreen.ManualDownload)
                 }
 
-                MenuItem.UNIVERSAL_APKS -> onUniversalApks(app)
+                MenuItem.UNIVERSAL_APKS -> showUniversalApksSheet = true
 
                 MenuItem.INSTALL_OTHER_ACCOUNT -> {
                     showAccountPicker = true
