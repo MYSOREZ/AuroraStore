@@ -159,6 +159,29 @@ class AuthProvider @Inject constructor(
     }
 
     /**
+     * Builds an [AuthData] by reusing [baseAuthData]'s existing token with new device [properties].
+     * Unlike [buildAuthDataWithProperties], this never calls the dispenser — safe to call many
+     * times without rate-limiting risk.
+     *
+     * Used by [com.aurora.store.data.work.UniversalApksWorker] for locale sweeps: build ONE auth
+     * via [buildAuthDataWithProperties] (one dispenser call for anonymous accounts), then call
+     * this per language to avoid per-locale dispenser calls.
+     */
+    fun buildAuthDataReusingToken(baseAuthData: AuthData, properties: Properties): AuthData {
+        val hasAasToken = baseAuthData.aasToken.isNotBlank()
+        val tokenType = if (hasAasToken) AuthHelper.Token.AAS else AuthHelper.Token.AUTH
+        val token = if (hasAasToken) baseAuthData.aasToken else baseAuthData.authToken
+        return AuthHelper.build(
+            email = baseAuthData.email,
+            token = token,
+            tokenType = tokenType,
+            isAnonymous = !hasAasToken,
+            properties = properties,
+            locale = spoofProvider.locale
+        )
+    }
+
+    /**
      * Builds [AuthData] for login using personal Google account
      * @param email E-mail ID
      * @param token AAS or Auth token

@@ -35,6 +35,7 @@ import com.aurora.extensions.isPAndAbove
 import com.aurora.extensions.isQAndAbove
 import com.aurora.extensions.isRAndAbove
 import com.aurora.gplayapi.data.models.App
+import com.aurora.gplayapi.data.models.AuthData
 import com.aurora.gplayapi.data.models.PlayFile
 import com.aurora.gplayapi.helpers.PurchaseHelper
 import com.aurora.gplayapi.network.IHttpClient
@@ -262,21 +263,42 @@ class UniversalApksWorker @AssistedInject constructor(
 
         // Locale sweep: Play returns at most ONE locale split per purchase call.
         // Make a dedicated call per language so every selected locale is collected.
-        // Skip locales whose split is already in collected (e.g. device locale from Config 0).
-        for (locale in selectedLocales.filter { it.isNotBlank() }) {
-            if (isStopped) break
-            val alreadyHave = collectedFiles.keys.any { name ->
-                val id = configIdFromName(name) ?: return@any false
-                id == locale || id.startsWith("${locale}_")
+        //
+        // To avoid N dispenser calls (one per locale) and the rate-limiting that entails:
+        // build ONE base auth for the locale sweep (one dispenser call for anonymous accounts),
+        // then reuse its token for all per-locale purchases via buildAuthDataReusingToken().
+        // For Google accounts, buildAuthDataWithProperties() is already free (no dispenser).
+        if (selectedLocales.isNotEmpty()) {
+            @Suppress("UNCHECKED_CAST")
+            val localeBaseProps = (baseProps.clone() as Properties).apply {
+                setProperty("Platforms", sweepAbi)
+                setProperty("Screen.Density", "640")
             }
-            if (alreadyHave) continue
-            collectForConfig(
-                collectedFiles, baseProps,
-                abi = sweepAbi, density = 640,
-                isAnonymous = isAnonymous,
-                localeOverride = locale
-            )
-            if (isAnonymous) delay(DISPENSER_DELAY_MS)
+            val localeBaseAuth = runCatching {
+                if (isAnonymous) delay(DISPENSER_DELAY_MS)  // cooldown before locale dispenser call
+                authProvider.buildAuthDataWithProperties(accountId, localeBaseProps)
+            }.getOrElse {
+                Log.w(TAG, "Locale base auth failed, will fall back to per-locale dispenser: ${it.message}")
+                null
+            }
+
+            for (locale in selectedLocales.filter { it.isNotBlank() }) {
+                if (isStopped) break
+                val alreadyHave = collectedFiles.keys.any { name ->
+                    val id = configIdFromName(name) ?: return@any false
+                    id == locale || id.startsWith("${locale}_")
+                }
+                if (alreadyHave) continue
+                collectForConfig(
+                    collectedFiles, baseProps,
+                    abi = sweepAbi, density = 640,
+                    isAnonymous = isAnonymous,
+                    localeOverride = locale,
+                    reuseAuth = localeBaseAuth
+                )
+                // Delay only when falling back to per-locale dispenser calls
+                if (isAnonymous && localeBaseAuth == null) delay(DISPENSER_DELAY_MS)
+            }
         }
 
         if (collectedFiles.isEmpty()) {
@@ -564,7 +586,8 @@ class UniversalApksWorker @AssistedInject constructor(
         abi: String,
         density: Int,
         isAnonymous: Boolean,
-        localeOverride: String? = null
+        localeOverride: String? = null,
+        reuseAuth: AuthData? = null
     ) {
         val label = if (localeOverride != null) "$abi @ ${density}dpi / $localeOverride"
                     else "$abi @ ${density}dpi"
@@ -575,7 +598,14 @@ class UniversalApksWorker @AssistedInject constructor(
                 setProperty("Screen.Density", density.toString())
                 if (localeOverride != null) setProperty("Locales", localeOverride)
             }
-            val authData = authProvider.buildAuthDataWithProperties(accountId, props)
+            // Reuse an existing auth token when provided (avoids a dispenser call per locale).
+            // buildAuthDataReusingToken() calls AuthHelper.build() with the same credentials but
+            // new device properties — no HTTP call to the dispenser.
+            val authData = if (reuseAuth != null) {
+                authProvider.buildAuthDataReusingToken(reuseAuth, props)
+            } else {
+                authProvider.buildAuthDataWithProperties(accountId, props)
+            }
             val purchaseHelper = PurchaseHelper(authData).using(httpClient)
             val files = if (isPAndAbove && PackageUtil.isInstalled(context, packageName)) {
                 purchaseHelper.purchase(
