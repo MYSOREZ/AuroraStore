@@ -591,4 +591,16 @@
         <item quantity="many">%1$d избранных</item>
         <item quantity="other">%1$d избранных</item>
     </plurals>
+
+    <string name="action_download_universal_apks">Скачать универсальный APKS</string>
+    <string name="universal_apks_section_architecture">Архитектура</string>
+    <string name="universal_apks_section_density">Плотность экрана</string>
+    <string name="universal_apks_section_locales">Языки</string>
+    <string name="universal_apks_section_extras">Дополнительно</string>
+    <string name="universal_apks_include_dynamic_features">Включить модули динамических функций (df_*)</string>
+    <string name="universal_apks_gathering">Сбор информации о сплитах…</string>
+    <string name="universal_apks_downloading">Скачивание сплитов…</string>
+    <string name="universal_apks_bundling">Упаковка APKS…</string>
+    <string name="universal_apks_notification_complete">Универсальный APKS готов — нажмите «Поделиться» для экспорта</string>
+    <string name="universal_apks_notification_failed">Ошибка загрузки универсального APKS</string>
 </resources>
