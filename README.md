@@ -25,7 +25,10 @@ Aurora Store works exactly like a door or a browser, allowing you to log in to y
 - Download manager
 - Manual downloads: allows you to download older version of apps, provided
   - The APKs are available with Google
-  - You know the version codes for older versions 
+  - You know the version codes for older versions
+- **Universal APKS bundles**: download all split variants (multiple architectures, screen densities,
+  and languages) into a single `.apks` file installable on any device via
+  [SAI](https://github.com/Aefyr/SAI) or bundletool
 
 ## Limitations
 
@@ -107,6 +110,45 @@ You can support Aurora Store's development financially via options below. For mo
 <a href="https://www.paypal.com/paypalme/AuroraDev">
   <img src="https://www.paypalobjects.com/webstatic/mktg/logo/AM_mc_vs_dc_ae.jpg" height="45" alt="PayPal">
 </a>
+
+## Changelog (branch `claude/universal-apk-bundle-iaa1wg`)
+
+### Universal APKS download
+
+Added the ability to download a **universal `.apks` bundle** — a ZIP containing APK splits for
+every architecture, screen density, and language you choose. The bundle can be installed on any
+device with SAI or bundletool, making it useful for distributing apps offline or sideloading onto
+devices with unusual hardware.
+
+**How it works**
+
+Aurora already downloads device-matched splits (one ABI, one density, current locale). To collect
+all variants the worker makes up to ten purchase requests with different virtual device profiles:
+one per selected ABI at the highest density, then one per selected density using arm64-v8a (most
+widely supported). Results are deduplicated by filename and filtered to exactly what the user chose.
+
+**Key implementation details**
+
+- `UniversalApksWorker` — new `@HiltWorker` that drives the whole pipeline:
+  purchase → deduplicate → download → ZIP → publish
+- `AuthProvider.buildAuthDataWithProperties()` — builds a throwaway `AuthData` from custom device
+  properties without touching saved account settings or triggering an app restart
+- Split filtering: ABI is always filtered strictly (no arm64 fallback if not selected); density and
+  locale use a smart fallback (keep whatever exists if none of the requested type was returned)
+- Output saved to `Download/AuroraStore/` via `MediaStore.Downloads` on Android 10+ (no special
+  permission required); falls back to app-private external dir on older devices
+- Progress ring, speed, and ETA are byte-accurate across all files in the job
+- `Download.isUniversalApks` flag (DB migration 10 → 11) prevents the app details screen from
+  misreading a completed bundle as a pending install and from deleting the download row
+- GitHub Actions workflow added (`.github/workflows/build.yml`) — builds a debug APK on every
+  push to `main`, `master`, or `claude/**` branches
+
+**Entry points**
+
+- App details screen → "Download Universal APKS" button (shown for any downloadable app)
+- Manual download screen → same button below the version/architecture fields
+- Configuration sheet (`UniversalApksConfigSheet`) lets the user pick architectures, screen
+  densities, languages, and whether to include dynamic feature modules before starting
 
 ## Project references
 
