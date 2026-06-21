@@ -154,8 +154,13 @@ private fun ScreenContent(
             keyboardController?.hide()
             searchBarState.animateToCollapsed()
         }
-        onSearch(textFieldState.text.toString())
-        isSearching = true
+        val pkgName = extractPackageName(query.trim())
+        if (pkgName != null) {
+            showDetailPane(pkgName)
+        } else {
+            onSearch(textFieldState.text.toString())
+            isSearching = true
+        }
     }
 
     @Composable
@@ -464,6 +469,25 @@ private fun FilterHeader(
             }
         }
     }
+}
+
+/**
+ * If [input] looks like an Android package name or a Google Play / market URL, returns the
+ * package name so the caller can navigate straight to the app details screen rather than
+ * running a keyword search.
+ *
+ * Handles:
+ *  - bare package names:  `com.whatsapp`, `com.aurora.store`
+ *  - Play Store URLs:     `https://play.google.com/store/apps/details?id=com.whatsapp&hl=en`
+ *  - market:// URIs:      `market://details?id=com.whatsapp`
+ */
+private fun extractPackageName(input: String): String? {
+    // URL / market URI: extract the id= query parameter
+    Regex("[?&]id=([A-Za-z][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)+)")
+        .find(input)?.groupValues?.get(1)?.let { return it }
+    // Bare package name: ≥2 dot-separated components, no spaces, first component starts with letter
+    if (input.matches(Regex("[A-Za-z][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)+"))) return input
+    return null
 }
 
 @PreviewWrapper(ThemePreviewProvider::class)
