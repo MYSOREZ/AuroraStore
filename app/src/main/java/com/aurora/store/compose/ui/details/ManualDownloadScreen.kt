@@ -8,6 +8,8 @@ package com.aurora.store.compose.ui.details
 
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.LocalActivity
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -39,6 +41,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.dimensionResource
 import androidx.compose.ui.res.painterResource
@@ -57,12 +60,14 @@ import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.aurora.extensions.adaptiveNavigationIcon
 import com.aurora.extensions.isWindowCompact
+import com.aurora.extensions.toast
 import com.aurora.gplayapi.data.models.App
 import com.aurora.store.R
 import com.aurora.store.compose.composable.Info
 import com.aurora.store.compose.composable.TopAppBar
 import com.aurora.store.compose.preview.AppPreviewProvider
 import com.aurora.store.compose.preview.ThemePreviewProvider
+import com.aurora.store.compose.ui.details.composable.UniversalApksConfigSheet
 import com.aurora.store.data.model.AppState
 import com.aurora.store.viewmodel.details.AppDetailsViewModel
 import kotlinx.coroutines.android.awaitFrame
@@ -75,6 +80,7 @@ fun ManualDownloadScreen(
     viewModel: AppDetailsViewModel = hiltViewModel(key = packageName),
     windowAdaptiveInfo: WindowAdaptiveInfo = currentWindowAdaptiveInfoV2()
 ) {
+    val context = LocalContext.current
     val app by viewModel.app.collectAsStateWithLifecycle()
     val state by viewModel.state.collectAsStateWithLifecycle()
     val topAppBarTitle = when {
@@ -82,20 +88,25 @@ fun ManualDownloadScreen(
         else -> stringResource(R.string.title_manual_download)
     }
 
+    fun buildRequestedApp(versionCode: Long): App = app!!.copy(
+        versionCode = versionCode,
+        dependencies = app!!.dependencies.copy(
+            dependentLibraries = app!!.dependencies.dependentLibraries.map { lib ->
+                lib.copy(versionCode = versionCode)
+            }
+        )
+    )
+
     ScreenContent(
         state = state,
         topAppBarTitle = topAppBarTitle,
         currentVersionCode = app!!.versionCode,
-        onRequestInstall = { versionCode ->
-            val requestedApp = app!!.copy(
-                versionCode = versionCode,
-                dependencies = app!!.dependencies.copy(
-                    dependentLibraries = app!!.dependencies.dependentLibraries.map { lib ->
-                        lib.copy(versionCode = versionCode)
-                    }
-                )
+        onRequestInstall = { versionCode -> onRequestInstall(buildRequestedApp(versionCode)) },
+        onRequestUniversalApks = { versionCode, abis, densities, locales, includeDfs ->
+            viewModel.enqueueUniversalApks(
+                buildRequestedApp(versionCode), abis, densities, locales, includeDfs
             )
-            onRequestInstall(requestedApp)
+            context.toast(R.string.universal_apks_gathering)
         }
     )
 }
@@ -106,6 +117,7 @@ private fun ScreenContent(
     topAppBarTitle: String? = null,
     currentVersionCode: Long = 0L,
     onRequestInstall: (versionCode: Long) -> Unit = {},
+    onRequestUniversalApks: ((versionCode: Long, abis: Set<String>, densities: Set<Int>, locales: Set<String>, includeDfs: Boolean) -> Unit)? = null,
     windowAdaptiveInfo: WindowAdaptiveInfo = currentWindowAdaptiveInfoV2()
 ) {
     val activity = LocalActivity.current as? ComponentActivity
@@ -119,10 +131,22 @@ private fun ScreenContent(
         val initText = currentVersionCode.toString()
         mutableStateOf(TextFieldValue(text = initText, selection = TextRange(initText.length)))
     }
+    var showUniversalApksSheet by remember { mutableStateOf(false) }
 
     LaunchedEffect(focusRequester) {
         awaitFrame()
         focusRequester.requestFocus()
+    }
+
+    if (showUniversalApksSheet && onRequestUniversalApks != null) {
+        val vc = versionCode.text.toLongOrNull() ?: currentVersionCode
+        UniversalApksConfigSheet(
+            onDismiss = { showUniversalApksSheet = false },
+            onDownload = { abis, densities, locales, includeDfs ->
+                showUniversalApksSheet = false
+                onRequestUniversalApks(vc, abis, densities, locales, includeDfs)
+            }
+        )
     }
 
     Scaffold(
@@ -197,13 +221,33 @@ private fun ScreenContent(
                     )
                 }
 
+                val installInteractionSource = remember { MutableInteractionSource() }
                 Button(
-                    modifier = Modifier.weight(1F),
+                    modifier = if (onRequestUniversalApks != null) {
+                        Modifier.weight(1F).combinedClickable(
+                            interactionSource = installInteractionSource,
+                            indication = null,
+                            enabled = !state.inProgress(),
+                            onClick = {
+                                onRequestInstall(versionCode.text.toLong())
+                                focusManager.clearFocus()
+                            },
+                            onLongClick = {
+                                focusManager.clearFocus()
+                                showUniversalApksSheet = true
+                            }
+                        )
+                    } else {
+                        Modifier.weight(1F)
+                    },
+                    onClick = if (onRequestUniversalApks != null) ({}) else {
+                        {
+                            onRequestInstall(versionCode.text.toLong())
+                            focusManager.clearFocus()
+                        }
+                    },
                     enabled = !state.inProgress(),
-                    onClick = {
-                        onRequestInstall(versionCode.text.toLong())
-                        focusManager.clearFocus()
-                    }
+                    interactionSource = if (onRequestUniversalApks != null) installInteractionSource else null
                 ) {
                     Text(
                         text = stringResource(R.string.action_install),
