@@ -7,10 +7,14 @@ package com.aurora.store.data.work
 
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
 import android.net.Uri
+import android.os.Environment
+import android.provider.MediaStore
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.FileProvider
@@ -27,8 +31,6 @@ import androidx.work.OutOfQuotaPolicy
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import android.Manifest
-import android.content.pm.PackageManager
-import android.os.Environment
 import com.aurora.extensions.isPAndAbove
 import com.aurora.extensions.isQAndAbove
 import com.aurora.extensions.isRAndAbove
@@ -301,34 +303,31 @@ class UniversalApksWorker @AssistedInject constructor(
             return Result.failure()
         }
 
-        // Step 3: Bundle into .apks ZIP
+        // Step 3: Bundle into .apks ZIP (temp file in cache, then publish to public storage)
         enterForeground(context.getString(R.string.universal_apks_bundling))
         notifyProgress(context.getString(R.string.universal_apks_bundling))
         runCatching { downloadDao.updateProgress(packageName, 95, 0L, 0L) }
 
-        val outputDir = resolveOutputDir()?.also { it.mkdirs() }
-            ?: run {
-                Log.e(TAG, "Cannot access output directory")
-                finalizeDownloadRow(success = false)
-                notifyResult(success = false)
-                return Result.failure()
-            }
-
-        val outputFile = File(outputDir, "${packageName}_${versionCode}_universal.apks")
+        val tempDir = File(context.cacheDir, "universal_apks_temp").also { it.mkdirs() }
+        val tempFile = File(tempDir, "${packageName}_${versionCode}_universal.apks")
 
         runCatching {
-            bundleIntoApks(downloadedFiles, outputFile)
+            bundleIntoApks(downloadedFiles, tempFile)
         }.onFailure {
             Log.e(TAG, "Failed to bundle APKS for $packageName", it)
-            outputFile.delete()
+            tempFile.delete()
             finalizeDownloadRow(success = false)
             notifyResult(success = false)
             return Result.failure()
         }
 
-        Log.i(TAG, "Universal APKS ready: ${outputFile.absolutePath} (${outputFile.length()} bytes)")
+        Log.i(TAG, "Bundle ready: ${tempFile.length()} bytes — publishing to storage")
+        val (savedPath, shareUri) = publishBundledFile(tempFile)
+        tempFile.delete()
+
+        Log.i(TAG, "Universal APKS published: $savedPath")
         finalizeDownloadRow(success = true)
-        notifyResult(success = true, outputFile = outputFile)
+        notifyResult(success = true, savedPath = savedPath, shareUri = shareUri)
         return Result.success()
     }
 
@@ -385,69 +384,145 @@ class UniversalApksWorker @AssistedInject constructor(
     }
 
     /**
-     * Removes config splits for ABI, density, or locale that the user did NOT select.
+     * Removes config splits for ABI, density, or locale that the user did NOT select,
+     * but ONLY when at least one of the requested type was actually collected.
+     *
+     * Fallback rule: if no requested ABI split was returned (e.g. app has no x86 build),
+     * keep whatever ABI splits exist so the bundle still works. Same logic applies to
+     * density and locale splits — a partial bundle beats an empty one.
+     *
      * Keeps base.apk, df_*.apk, and any unrecognised split type unchanged.
-     *
-     * Split name patterns: "config.arm64_v8a.apk", "config.xxxhdpi.apk", "config.ru.apk",
-     * "split_config.xxhdpi.apk", "df_feature.apk", "base.apk"
-     *
-     * Note: Config 0 always uses the device's saved authData, so it returns the device's
-     * native ABI and locale splits regardless of user selection — those are caught here.
      */
     private fun filterCollectedFiles(files: LinkedHashMap<String, PlayFile>) {
         val wantedDensityLabels = selectedDensities.mapNotNull { DENSITY_LABEL[it] }.toSet()
-        // ABI ids as they appear in file names (dashes replaced with underscores)
         val allAbiFileIds = ALL_ABIS.map { it.replace("-", "_") }.toSet()
         val selectedAbiFileIds = selectedAbis.map { it.replace("-", "_") }.toSet()
 
+        // Pre-scan to see which requested split types we actually got
+        val gotRequestedAbi = files.keys.any { name ->
+            val id = configIdFromName(name) ?: return@any false
+            allAbiFileIds.any { id.equals(it, ignoreCase = true) } &&
+                selectedAbiFileIds.any { id.equals(it, ignoreCase = true) }
+        }
+        val gotRequestedDensity = files.keys.any { name ->
+            val id = configIdFromName(name) ?: return@any false
+            id in wantedDensityLabels
+        }
+        val gotRequestedLocale = files.keys.any { name ->
+            val id = configIdFromName(name) ?: return@any false
+            !allAbiFileIds.any { id.equals(it, ignoreCase = true) } &&
+                !DENSITY_LABEL.values.contains(id) &&
+                selectedLocales.any { loc -> id == loc || id.startsWith("${loc}_") }
+        }
+
+        Log.i(TAG, "Filter state: gotAbi=$gotRequestedAbi gotDensity=$gotRequestedDensity gotLocale=$gotRequestedLocale")
+
         files.entries.removeIf { (name, _) ->
-            // Extract "XYZ" from "config.XYZ.apk" or "split_config.XYZ.apk"
-            val configId = Regex("config\\.([^.]+)\\.apk").find(name)?.groupValues?.get(1)
-                ?: return@removeIf false  // base.apk, df_*.apk, etc. — always keep
+            val configId = configIdFromName(name) ?: return@removeIf false
 
             when {
-                // ABI split: keep only if user selected that ABI
+                // ABI split: filter only when we got at least one requested ABI
                 allAbiFileIds.any { configId.equals(it, ignoreCase = true) } ->
-                    selectedAbiFileIds.isNotEmpty() &&
-                        selectedAbiFileIds.none { configId.equals(it, ignoreCase = true) }
+                    gotRequestedAbi && selectedAbiFileIds.none { configId.equals(it, ignoreCase = true) }
 
-                // Density split: keep only if user selected that density
+                // Density split: filter only when we got at least one requested density
                 DENSITY_LABEL.values.any { it == configId } ->
-                    configId !in wantedDensityLabels
+                    gotRequestedDensity && configId !in wantedDensityLabels
 
-                // Locale split: keep only if user selected that locale
+                // Locale split: filter only when we got at least one requested locale
                 selectedLocales.isNotEmpty() ->
-                    selectedLocales.none { locale ->
+                    gotRequestedLocale && selectedLocales.none { locale ->
                         configId == locale || configId.startsWith("${locale}_")
                     }
 
-                // Unknown split type: keep
                 else -> false
             }
         }
     }
 
+    /** Extracts the config identifier from "config.XYZ.apk" or "split_config.XYZ.apk". */
+    private fun configIdFromName(name: String): String? =
+        Regex("config\\.([^.]+)\\.apk").find(name)?.groupValues?.get(1)
+
     /**
-     * Returns the best available output directory for the .apks file.
-     * Prefers public Downloads/AuroraStore/ when storage permission is granted,
-     * falling back to the app-private external files directory.
+     * Copies [source] to a user-visible location and returns the display path and a
+     * URI suitable for the share intent.
+     *
+     * Strategy (in priority order):
+     *  1. Android Q+ → MediaStore.Downloads ("Download/AuroraStore/") — no extra permission
+     *  2. Android R+ with MANAGE_EXTERNAL_STORAGE → raw file in public Downloads
+     *  3. Pre-Q with WRITE_EXTERNAL_STORAGE → raw file in public Downloads
+     *  4. Fallback → app-private external dir (always accessible, no permission needed)
      */
-    private fun resolveOutputDir(): File? {
-        val canWritePublic = if (isRAndAbove) {
-            Environment.isExternalStorageManager()
-        } else {
-            context.checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) ==
-                PackageManager.PERMISSION_GRANTED
+    private suspend fun publishBundledFile(source: File): Pair<String, Uri?> =
+        withContext(Dispatchers.IO) {
+            // Strategy 1: MediaStore.Downloads (Android Q+, no permission needed)
+            if (isQAndAbove) {
+                try {
+                    val values = ContentValues().apply {
+                        put(MediaStore.Downloads.DISPLAY_NAME, source.name)
+                        put(MediaStore.Downloads.MIME_TYPE, "application/zip")
+                        put(MediaStore.Downloads.RELATIVE_PATH, "Download/AuroraStore")
+                        put(MediaStore.Downloads.IS_PENDING, 1)
+                    }
+                    val resolver = context.contentResolver
+                    val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                    if (uri != null) {
+                        resolver.openOutputStream(uri)?.use { out ->
+                            source.inputStream().use { it.copyTo(out) }
+                        }
+                        values.clear()
+                        values.put(MediaStore.Downloads.IS_PENDING, 0)
+                        resolver.update(uri, values, null, null)
+                        Log.i(TAG, "Published via MediaStore: $uri")
+                        return@withContext Pair("Download/AuroraStore/${source.name}", uri)
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "MediaStore publish failed: ${e.message}")
+                }
+            }
+
+            // Strategy 2/3: direct file in public Downloads
+            val canWriteDirect = if (isRAndAbove) {
+                Environment.isExternalStorageManager()
+            } else {
+                context.checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) ==
+                    PackageManager.PERMISSION_GRANTED
+            }
+            if (canWriteDirect) {
+                val publicDir = File(
+                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+                    "AuroraStore"
+                )
+                if (publicDir.mkdirs() || publicDir.exists()) {
+                    val dest = File(publicDir, source.name)
+                    try {
+                        source.copyTo(dest, overwrite = true)
+                        val fpUri = runCatching {
+                            FileProvider.getUriForFile(
+                                context, "${context.packageName}.fileProvider", dest
+                            )
+                        }.getOrNull()
+                        return@withContext Pair(dest.absolutePath, fpUri)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Direct copy to public Downloads failed: ${e.message}")
+                    }
+                }
+            }
+
+            // Strategy 4: fallback — app-private external dir
+            val privateDir = context.getExternalFilesDir("UniversalApks")
+                ?: context.filesDir.resolve("UniversalApks")
+            privateDir.mkdirs()
+            val privateFile = File(privateDir, source.name)
+            source.copyTo(privateFile, overwrite = true)
+            val fpUri = runCatching {
+                FileProvider.getUriForFile(
+                    context, "${context.packageName}.fileProvider", privateFile
+                )
+            }.getOrNull()
+            Pair(privateFile.absolutePath, fpUri)
         }
-        if (canWritePublic) {
-            val publicDir = File(
-                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
-                "AuroraStore"
-            )
-            if (publicDir.mkdirs() || publicDir.exists()) return publicDir
-        }
-        return context.getExternalFilesDir("UniversalApks")
-    }
 
     /**
      * Builds an AuthData for [abi] + [density] device config and purchases splits.
@@ -645,7 +720,12 @@ class UniversalApksWorker @AssistedInject constructor(
         notificationManager.notify(NOTIFICATION_ID_PROGRESS, notification)
     }
 
-    private fun notifyResult(success: Boolean, outputFile: File? = null, errorMessage: String? = null) {
+    private fun notifyResult(
+        success: Boolean,
+        savedPath: String? = null,
+        shareUri: Uri? = null,
+        errorMessage: String? = null
+    ) {
         notificationManager.cancel(NOTIFICATION_ID_FGS)
         notificationManager.cancel(NOTIFICATION_ID_PROGRESS)
 
@@ -654,34 +734,31 @@ class UniversalApksWorker @AssistedInject constructor(
             .setContentTitle(displayName)
             .setAutoCancel(true)
 
-        if (success && outputFile != null) {
-            val savedTo = outputFile.parentFile?.absolutePath ?: outputFile.absolutePath
+        if (success) {
             val completedText = context.getString(R.string.universal_apks_notification_complete)
             builder.setContentText(completedText)
-            builder.setStyle(NotificationCompat.BigTextStyle().bigText("$completedText\n$savedTo"))
-
-            // Share action so the user can open / send the .apks file
-            val uri: Uri = FileProvider.getUriForFile(
-                context,
-                "${context.packageName}.fileProvider",
-                outputFile
-            )
-            val shareIntent = Intent(Intent.ACTION_SEND).apply {
-                type = "application/zip"
-                putExtra(Intent.EXTRA_STREAM, uri)
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            if (savedPath != null) {
+                builder.setStyle(NotificationCompat.BigTextStyle().bigText("$completedText\n$savedPath"))
             }
-            val pendingShare = PendingIntent.getActivity(
-                context,
-                outputFile.hashCode(),
-                Intent.createChooser(shareIntent, outputFile.name),
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            )
-            builder.addAction(
-                R.drawable.ic_share,
-                context.getString(R.string.action_share),
-                pendingShare
-            )
+
+            if (shareUri != null) {
+                val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                    type = "application/zip"
+                    putExtra(Intent.EXTRA_STREAM, shareUri)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                val pendingShare = PendingIntent.getActivity(
+                    context,
+                    shareUri.hashCode(),
+                    Intent.createChooser(shareIntent, displayName),
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+                builder.addAction(
+                    R.drawable.ic_share,
+                    context.getString(R.string.action_share),
+                    pendingShare
+                )
+            }
         } else {
             val failed = context.getString(R.string.universal_apks_notification_failed)
             val text = if (!errorMessage.isNullOrBlank()) "$failed: $errorMessage" else failed
