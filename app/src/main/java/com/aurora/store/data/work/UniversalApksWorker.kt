@@ -103,6 +103,12 @@ class UniversalApksWorker @AssistedInject constructor(
         // Delay between dispenser calls to avoid rate-limiting (anonymous accounts only)
         private const val DISPENSER_DELAY_MS = 2000L
 
+        // Retry a file download up to this many times on transient errors (timeout, reset).
+        // Each retry resumes from the existing .tmp file via Range: bytes=N-, so no bytes are
+        // re-downloaded; the delay just gives the server time to recover.
+        private const val DOWNLOAD_MAX_RETRIES = 3
+        private const val DOWNLOAD_RETRY_DELAY_MS = 4000L
+
         // Target ABIs and densities for universal coverage
         private val TARGET_ABIS = listOf(
             "arm64-v8a",
@@ -254,7 +260,7 @@ class UniversalApksWorker @AssistedInject constructor(
             notifyProgress(context.getString(R.string.universal_apks_downloading) + " ($index/$total)")
             runCatching { downloadDao.updateProgress(packageName, progress, 0L, 0L) }
             runCatching {
-                val localFile = downloadFile(playFile, downloadDir)
+                val localFile = downloadFile(playFile, downloadDir, progress)
                 if (localFile != null) downloadedFiles.add(localFile)
             }.onFailure {
                 Log.w(TAG, "Failed to download ${playFile.name}: ${it.message}")
@@ -389,54 +395,80 @@ class UniversalApksWorker @AssistedInject constructor(
     }
 
     /**
-     * Downloads [playFile] to [dir], resuming if a partial file exists.
-     * Returns the completed [File] or null on failure.
+     * Downloads [playFile] to [dir] with up to [DOWNLOAD_MAX_RETRIES] attempts.
+     * Resumes partial `.tmp` files via `Range: bytes=N-` so transient timeouts (e.g. on
+     * large ABI splits) don't require re-downloading from the start.
+     * Returns the completed [File] or null if all attempts fail or the URL returns an
+     * unrecoverable HTTP error (403/404/410).
      */
-    private suspend fun downloadFile(playFile: PlayFile, dir: File): File? =
+    private suspend fun downloadFile(playFile: PlayFile, dir: File, fileProgress: Int = 0): File? =
         withContext(Dispatchers.IO) {
             val targetFile = File(dir, playFile.name)
-            if (targetFile.exists() && targetFile.length() == playFile.size) {
+            if (targetFile.exists() && playFile.size > 0 && targetFile.length() == playFile.size) {
                 Log.i(TAG, "${playFile.name} already complete, skipping")
                 return@withContext targetFile
             }
 
             val tmpFile = File(dir, "${playFile.name}.tmp")
-            val existingBytes = if (tmpFile.exists()) tmpFile.length() else 0L
 
-            try {
-                val headers = mutableMapOf<String, String>()
-                if (existingBytes > 0) headers["Range"] = "bytes=$existingBytes-"
+            for (attempt in 1..DOWNLOAD_MAX_RETRIES) {
+                val existingBytes = if (tmpFile.exists()) tmpFile.length() else 0L
 
-                val response = (httpClient as HttpClient).call(playFile.url, headers)
-                if (!response.isSuccessful) {
-                    Log.w(TAG, "HTTP ${response.code} for ${playFile.name}")
-                    response.close()
-                    return@withContext null
-                }
+                try {
+                    val headers = mutableMapOf<String, String>()
+                    if (existingBytes > 0) headers["Range"] = "bytes=$existingBytes-"
 
-                val resuming = existingBytes > 0 && response.code == 206
-                FileOutputStream(tmpFile, resuming).use { out ->
-                    val buffer = ByteArray(BUFFER_SIZE)
-                    response.body.byteStream().use { input ->
-                        var read = input.read(buffer)
-                        while (read >= 0) {
-                            out.write(buffer, 0, read)
-                            read = input.read(buffer)
+                    val response = (httpClient as HttpClient).call(playFile.url, headers)
+                    if (!response.isSuccessful) {
+                        Log.w(TAG, "HTTP ${response.code} for ${playFile.name} (attempt $attempt)")
+                        response.close()
+                        // 403/410 = expired URL; 404 = missing. No point retrying.
+                        break
+                    }
+
+                    val resuming = existingBytes > 0 && response.code == 206
+                    var speedBytes = 0L
+                    var speedWindowStart = System.currentTimeMillis()
+
+                    FileOutputStream(tmpFile, resuming).use { out ->
+                        val buffer = ByteArray(BUFFER_SIZE)
+                        response.body.byteStream().use { input ->
+                            var read = input.read(buffer)
+                            while (read >= 0) {
+                                out.write(buffer, 0, read)
+                                speedBytes += read
+                                val now = System.currentTimeMillis()
+                                val elapsed = now - speedWindowStart
+                                if (elapsed >= 1000L) {
+                                    val speed = speedBytes * 1000L / elapsed
+                                    runCatching {
+                                        downloadDao.updateProgress(packageName, fileProgress, speed, 0L)
+                                    }
+                                    speedBytes = 0L
+                                    speedWindowStart = now
+                                }
+                                read = input.read(buffer)
+                            }
                         }
                     }
-                }
 
-                if (!tmpFile.renameTo(targetFile)) {
-                    Log.w(TAG, "Could not rename ${tmpFile.name} → ${targetFile.name}")
-                    return@withContext null
-                }
+                    if (!tmpFile.renameTo(targetFile)) {
+                        Log.w(TAG, "Could not rename ${tmpFile.name} → ${targetFile.name}")
+                        return@withContext null
+                    }
 
-                Log.i(TAG, "Downloaded ${playFile.name} (${targetFile.length()} bytes)")
-                targetFile
-            } catch (e: Exception) {
-                Log.e(TAG, "Download failed for ${playFile.name}", e)
-                null
+                    Log.i(TAG, "Downloaded ${playFile.name} (${targetFile.length()} bytes)")
+                    return@withContext targetFile
+                } catch (e: Exception) {
+                    if (attempt < DOWNLOAD_MAX_RETRIES) {
+                        Log.w(TAG, "Attempt $attempt/$DOWNLOAD_MAX_RETRIES failed for ${playFile.name}: ${e.message}, resuming in ${DOWNLOAD_RETRY_DELAY_MS}ms")
+                        delay(DOWNLOAD_RETRY_DELAY_MS)
+                    } else {
+                        Log.e(TAG, "Download failed for ${playFile.name}", e)
+                    }
+                }
             }
+            null
         }
 
     /**
