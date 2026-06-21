@@ -370,8 +370,15 @@ class UniversalApksWorker @AssistedInject constructor(
                 setProperty("Screen.Density", density.toString())
             }
             val authData = authProvider.buildAuthDataWithProperties(accountId, props)
-            val files = PurchaseHelper(authData).using(httpClient)
-                .purchase(packageName, versionCode, offerType)
+            val purchaseHelper = PurchaseHelper(authData).using(httpClient)
+            val files = if (isPAndAbove && PackageUtil.isInstalled(context, packageName)) {
+                purchaseHelper.purchase(
+                    packageName, versionCode, offerType,
+                    CertUtil.getEncodedCertificateHashes(context, packageName).lastOrNull() ?: ""
+                )
+            } else {
+                purchaseHelper.purchase(packageName, versionCode, offerType)
+            }
             val newFiles = files.filter { it.url.isNotBlank() }
                 .filterNot { collected.containsKey(it.name) }
             newFiles.forEach { collected[it.name] = it }
