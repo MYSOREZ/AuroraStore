@@ -332,7 +332,7 @@ class UniversalApksWorker @AssistedInject constructor(
         val tempDir = File(context.cacheDir, "universal_apks_temp").also { it.mkdirs() }
         val tempFile = File(tempDir, "${packageName}_${versionCode}_universal.apks")
 
-        val bundleMetadata = buildBundleMetadata()
+        val bundleMetadata = buildBundleMetadata(downloadedFiles)
 
         runCatching {
             bundleIntoApks(downloadedFiles, tempFile, bundleMetadata)
@@ -685,25 +685,45 @@ class UniversalApksWorker @AssistedInject constructor(
 
     /**
      * Builds the human-readable metadata text written as [METADATA_FILENAME] into the bundle.
-     * Lists selected ABIs, locales, densities, and whether dynamic features are included.
+     * Reflects the files that were ACTUALLY downloaded, not the user's selection — so if a
+     * split type doesn't exist for this app, it won't appear in the list.
      */
-    private fun buildBundleMetadata(): String {
-        val abis = ALL_ABIS.filter { it in selectedAbis }.joinToString(", ")
-        val locales = selectedLocales.map { it.uppercase() }.joinToString(", ")
-            .ifEmpty { "—" }
-        val densities = ALL_DENSITIES
-            .filter { it in selectedDensities }
-            .mapNotNull { DENSITY_LABEL[it] }
-            .joinToString(", ")
-            .ifEmpty { "—" }
-        val dfs = if (includeDfs) "да" else "нет"
+    private fun buildBundleMetadata(downloadedFiles: List<File>): String {
+        val allAbiFileIds = ALL_ABIS.map { it.replace("-", "_") }.toSet()
+        val densityLabelSet = DENSITY_LABEL.values.toSet()
+
+        val foundAbis = mutableSetOf<String>()
+        val foundDensities = mutableSetOf<String>()
+        val foundLocales = mutableSetOf<String>()
+        var foundDfs = false
+
+        for (file in downloadedFiles) {
+            if (file.name.startsWith("df_")) { foundDfs = true; continue }
+            val configId = configIdFromName(file.name) ?: continue
+            when {
+                allAbiFileIds.any { configId.equals(it, ignoreCase = true) } -> {
+                    val canonical = ALL_ABIS.find {
+                        it.replace("-", "_").equals(configId, ignoreCase = true)
+                    } ?: configId
+                    foundAbis += canonical
+                }
+                densityLabelSet.contains(configId) -> foundDensities += configId
+                else -> foundLocales += configId.uppercase()
+            }
+        }
+
+        val sortedAbis = ALL_ABIS.filter { it in foundAbis }
+        val sortedDensities = ALL_DENSITIES.mapNotNull { DENSITY_LABEL[it] }
+            .filter { it in foundDensities }
+        val sortedLocales = foundLocales.sorted()
+
         return buildString {
             appendLine("$packageName $versionCode")
             appendLine()
-            appendLine("Архитектура: $abis.")
-            appendLine("Локаль: $locales.")
-            appendLine("Размер экрана: $densities.")
-            append("Динамические функции: $dfs.")
+            appendLine("Архитектура: ${sortedAbis.ifEmpty { listOf("—") }.joinToString(", ")}.")
+            appendLine("Локаль: ${sortedLocales.ifEmpty { listOf("—") }.joinToString(", ")}.")
+            appendLine("Размер экрана: ${sortedDensities.ifEmpty { listOf("—") }.joinToString(", ")}.")
+            append("Динамические функции: ${if (foundDfs) "да" else "нет"}.")
         }
     }
 
