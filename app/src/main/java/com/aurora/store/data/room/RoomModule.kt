@@ -11,6 +11,7 @@ import com.aurora.store.data.room.MigrationHelper.MIGRATION_6_7
 import com.aurora.store.data.room.MigrationHelper.MIGRATION_7_8
 import com.aurora.store.data.room.MigrationHelper.MIGRATION_8_9
 import com.aurora.store.data.room.MigrationHelper.MIGRATION_9_10
+import com.aurora.store.data.room.MigrationHelper.MIGRATION_10_11
 import com.aurora.store.data.room.account.AccountConverter
 import com.aurora.store.data.room.account.AccountDao
 import com.aurora.store.data.room.account.AppAccountBindingDao
@@ -49,7 +50,8 @@ object RoomModule {
             MIGRATION_6_7,
             MIGRATION_7_8,
             MIGRATION_8_9,
-            MIGRATION_9_10
+            MIGRATION_9_10,
+            MIGRATION_10_11
         )
         .addTypeConverter(downloadConverter)
         .addTypeConverter(accountConverter)

@@ -37,7 +37,8 @@ data class Download(
     val sharedLibs: List<SharedLib>,
     val targetSdk: Int = 1,
     val downloadedAt: Long = 0,
-    val requiresGMS: Boolean = false
+    val requiresGMS: Boolean = false,
+    val isUniversalApks: Boolean = false
 ) : Parcelable {
     val isFinished get() = status in DownloadStatus.finished
     val isRunning get() = status in DownloadStatus.running

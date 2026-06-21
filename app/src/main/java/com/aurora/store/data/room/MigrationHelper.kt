@@ -46,6 +46,10 @@ object MigrationHelper {
         override fun migrate(db: SupportSQLiteDatabase) = migrateFrom9To10(db)
     }
 
+    val MIGRATION_10_11 = object : Migration(10, 11) {
+        override fun migrate(db: SupportSQLiteDatabase) = migrateFrom10To11(db)
+    }
+
     private const val TAG = "MigrationHelper"
 
     private fun migrateFrom1To2(database: SupportSQLiteDatabase) {
@@ -203,6 +207,24 @@ object MigrationHelper {
      * account is imported from SharedPreferences in code on first launch (see AccountRepository),
      * because a Room Migration cannot read SharedPreferences.
      */
+    /**
+     * Add isUniversalApks column to download table to distinguish Universal APKS bundle
+     * downloads from regular app downloads, preventing false "Installing" state on app details.
+     */
+    private fun migrateFrom10To11(database: SupportSQLiteDatabase) {
+        database.beginTransaction()
+        try {
+            database.execSQL(
+                "ALTER TABLE `download` ADD COLUMN isUniversalApks INTEGER NOT NULL DEFAULT 0"
+            )
+            database.setTransactionSuccessful()
+        } catch (exception: Exception) {
+            Log.e(TAG, "Failed while migrating from database version 10 to 11", exception)
+        } finally {
+            database.endTransaction()
+        }
+    }
+
     private fun migrateFrom9To10(database: SupportSQLiteDatabase) {
         database.beginTransaction()
         try {

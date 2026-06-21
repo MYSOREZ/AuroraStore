@@ -250,8 +250,9 @@ class UniversalApksWorker @AssistedInject constructor(
             if (isAnonymous) delay(DISPENSER_DELAY_MS)
         }
 
-        // Density sweep: use first selected ABI at each non-640 selected density
-        val sweepAbi = selectedAbis.firstOrNull { it in ALL_ABIS } ?: "arm64-v8a"
+        // Density sweep: always use arm64-v8a so density/locale splits are collected even when
+        // the user-selected ABI (e.g. x86) doesn't exist for this app.
+        val sweepAbi = "arm64-v8a"
         for (density in ALL_DENSITIES.filter { it in selectedDensities && it != 640 }) {
             if (isStopped) break
             collectForConfig(collectedFiles, baseProps, abi = sweepAbi, density = density, isAnonymous = isAnonymous)
@@ -365,7 +366,8 @@ class UniversalApksWorker @AssistedInject constructor(
                     downloadedFiles = 0,
                     fileList = emptyList(),
                     sharedLibs = emptyList(),
-                    downloadedAt = Date().time
+                    downloadedAt = Date().time,
+                    isUniversalApks = true
                 )
             )
         }.onFailure { Log.w(TAG, "Could not insert download row: ${it.message}") }

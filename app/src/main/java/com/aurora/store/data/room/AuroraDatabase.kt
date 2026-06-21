@@ -30,7 +30,7 @@ import com.aurora.store.data.room.update.UpdateDao
         Account::class,
         AppAccountBinding::class
     ],
-    version = 10,
+    version = 11,
     exportSchema = true
 )
 @TypeConverters(DownloadConverter::class, AccountConverter::class)

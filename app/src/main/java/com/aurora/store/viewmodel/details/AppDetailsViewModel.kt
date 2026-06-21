@@ -199,8 +199,10 @@ class AppDetailsViewModel @Inject constructor(
                 // A COMPLETED record for an app that is no longer installed means the app was
                 // installed then removed while Aurora held a stale record.
                 // Remove it so the live download observer doesn't lock the UI in Installing state
-                // indefinitely.
-                if (existingDownload?.status == DownloadStatus.COMPLETED && !isInstalled) {
+                // indefinitely. Universal APKS records are exempt — they are a bundle artifact,
+                // not a pending install, so they should remain in the Downloads list.
+                if (existingDownload?.status == DownloadStatus.COMPLETED && !isInstalled
+                    && !existingDownload.isUniversalApks) {
                     downloadHelper.removeDownload(packageName)
                     _state.value = defaultAppState
                 } else {
@@ -401,8 +403,8 @@ class AppDetailsViewModel @Inject constructor(
 
     // COMPLETED is bridged to Installing so the UI doesn't briefly fall back to the
     // install action between download finishing and the installer's first event.
-    // A stale COMPLETED row after install actually finished is handled by the
-    // isInstalled check.
+    // Universal APKS downloads are exempt: they produce a bundle file, not an installed app,
+    // so COMPLETED should show the normal app state rather than Installing.
     private fun stateFromDownload(download: Download): AppState = when (download.status) {
         DownloadStatus.DOWNLOADING -> AppState.Downloading(
             download.progress.toFloat(),
@@ -417,7 +419,11 @@ class AppDetailsViewModel @Inject constructor(
         DownloadStatus.VERIFYING -> AppState.Verifying
 
         DownloadStatus.COMPLETED,
-        DownloadStatus.INSTALLING -> if (isInstalled) defaultAppState else AppState.Installing(0F)
+        DownloadStatus.INSTALLING -> when {
+            isInstalled -> defaultAppState
+            download.isUniversalApks -> defaultAppState
+            else -> AppState.Installing(0F)
+        }
 
         else -> defaultAppState
     }
