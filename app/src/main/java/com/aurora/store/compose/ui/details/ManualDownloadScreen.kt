@@ -8,8 +8,6 @@ package com.aurora.store.compose.ui.details
 
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.LocalActivity
-import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -24,6 +22,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.ContainedLoadingIndicator
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
@@ -204,56 +203,56 @@ private fun ScreenContent(
                 )
             }
 
-            Row(
+            Column(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(
-                    dimensionResource(R.dimen.spacing_medium)
-                )
+                verticalArrangement = Arrangement.spacedBy(dimensionResource(R.dimen.spacing_small))
             ) {
-                FilledTonalButton(
-                    modifier = Modifier.weight(1F),
-                    onClick = { activity?.onBackPressedDispatcher?.onBackPressed() }
-                ) {
-                    Text(
-                        text = stringResource(R.string.action_close),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(
+                        dimensionResource(R.dimen.spacing_medium)
                     )
-                }
-
-                val installInteractionSource = remember { MutableInteractionSource() }
-                Button(
-                    modifier = if (onRequestUniversalApks != null) {
-                        Modifier.weight(1F).combinedClickable(
-                            interactionSource = installInteractionSource,
-                            indication = null,
-                            enabled = !state.inProgress(),
-                            onClick = {
-                                onRequestInstall(versionCode.text.toLong())
-                                focusManager.clearFocus()
-                            },
-                            onLongClick = {
-                                focusManager.clearFocus()
-                                showUniversalApksSheet = true
-                            }
+                ) {
+                    FilledTonalButton(
+                        modifier = Modifier.weight(1F),
+                        onClick = { activity?.onBackPressedDispatcher?.onBackPressed() }
+                    ) {
+                        Text(
+                            text = stringResource(R.string.action_close),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
-                    } else {
-                        Modifier.weight(1F)
-                    },
-                    onClick = if (onRequestUniversalApks != null) ({}) else {
-                        {
+                    }
+                    Button(
+                        modifier = Modifier.weight(1F),
+                        enabled = !state.inProgress(),
+                        onClick = {
                             onRequestInstall(versionCode.text.toLong())
                             focusManager.clearFocus()
                         }
-                    },
-                    enabled = !state.inProgress(),
-                    interactionSource = if (onRequestUniversalApks != null) installInteractionSource else null
-                ) {
-                    Text(
-                        text = stringResource(R.string.action_install),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                    ) {
+                        Text(
+                            text = stringResource(R.string.action_install),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+                if (onRequestUniversalApks != null) {
+                    OutlinedButton(
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !state.inProgress(),
+                        onClick = {
+                            focusManager.clearFocus()
+                            showUniversalApksSheet = true
+                        }
+                    ) {
+                        Text(
+                            text = stringResource(R.string.action_download_universal_apks),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
             }
         }

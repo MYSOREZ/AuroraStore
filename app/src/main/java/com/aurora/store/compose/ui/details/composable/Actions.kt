@@ -6,8 +6,6 @@
 
 package com.aurora.store.compose.ui.details.composable
 
-import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -21,7 +19,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.adaptive.WindowAdaptiveInfo
 import androidx.compose.material3.adaptive.currentWindowAdaptiveInfoV2
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.dimensionResource
 import androidx.compose.ui.res.stringResource
@@ -40,7 +37,6 @@ import com.aurora.store.compose.preview.ThemePreviewProvider
  * @param isPrimaryActionEnabled Whether the primary action is enabled
  * @param isSecondaryActionEnabled Whether the secondary action is enabled
  * @param onPrimaryAction Callback when the primary action is clicked
- * @param onPrimaryActionLongClick Callback when the primary action is long-pressed, or null to disable
  * @param onSecondaryAction Callback when the secondary action is clicked
  * @param windowAdaptiveInfo Adaptive window information
  */
@@ -51,7 +47,6 @@ fun Actions(
     isPrimaryActionEnabled: Boolean = true,
     isSecondaryActionEnabled: Boolean = true,
     onPrimaryAction: () -> Unit = {},
-    onPrimaryActionLongClick: (() -> Unit)? = null,
     onSecondaryAction: () -> Unit = {},
     windowAdaptiveInfo: WindowAdaptiveInfo = currentWindowAdaptiveInfoV2()
 ) {
@@ -78,22 +73,10 @@ fun Actions(
             )
         }
 
-        val primaryInteractionSource = remember { MutableInteractionSource() }
         Button(
-            modifier = if (onPrimaryActionLongClick != null) {
-                buttonWidthModifier.combinedClickable(
-                    interactionSource = primaryInteractionSource,
-                    indication = null,
-                    enabled = isPrimaryActionEnabled,
-                    onClick = onPrimaryAction,
-                    onLongClick = onPrimaryActionLongClick
-                )
-            } else {
-                buttonWidthModifier
-            },
-            onClick = if (onPrimaryActionLongClick != null) ({}) else onPrimaryAction,
-            enabled = isPrimaryActionEnabled,
-            interactionSource = if (onPrimaryActionLongClick != null) primaryInteractionSource else null
+            modifier = buttonWidthModifier,
+            onClick = onPrimaryAction,
+            enabled = isPrimaryActionEnabled
         ) {
             Text(
                 text = primaryActionDisplayName,

@@ -266,6 +266,7 @@ class UniversalApksWorker @AssistedInject constructor(
             .also { it.mkdirs() }
 
         enterForeground(context.getString(R.string.universal_apks_downloading))
+        runCatching { downloadDao.updateStatus(packageName, DownloadStatus.DOWNLOADING) }
 
         val downloadedFiles = mutableListOf<File>()
         val total = collectedFiles.size
@@ -275,7 +276,7 @@ class UniversalApksWorker @AssistedInject constructor(
             index++
             val progress = (index * 90 / total).coerceAtLeast(1)
             notifyProgress(context.getString(R.string.universal_apks_downloading) + " ($index/$total)")
-            runCatching { downloadDao.updateProgress(packageName, progress, 0L, 0L) }
+            runCatching { downloadDao.updateProgress(packageName, progress, 0L, -1L) }
             runCatching {
                 val localFile = downloadFile(playFile, downloadDir, progress)
                 if (localFile != null) downloadedFiles.add(localFile)
@@ -348,10 +349,10 @@ class UniversalApksWorker @AssistedInject constructor(
                     iconURL = iconUrl,
                     size = 0L,
                     id = 0,
-                    status = DownloadStatus.DOWNLOADING,
+                    status = DownloadStatus.PURCHASING,
                     progress = 0,
                     speed = 0L,
-                    timeRemaining = 0L,
+                    timeRemaining = -1L,
                     totalFiles = 0,
                     downloadedFiles = 0,
                     fileList = emptyList(),
@@ -454,6 +455,7 @@ class UniversalApksWorker @AssistedInject constructor(
 
                     val resuming = existingBytes > 0 && response.code == 206
                     var speedBytes = 0L
+                    var totalWritten = existingBytes
                     var speedWindowStart = System.currentTimeMillis()
 
                     FileOutputStream(tmpFile, resuming).use { out ->
@@ -463,12 +465,15 @@ class UniversalApksWorker @AssistedInject constructor(
                             while (read >= 0) {
                                 out.write(buffer, 0, read)
                                 speedBytes += read
+                                totalWritten += read
                                 val now = System.currentTimeMillis()
                                 val elapsed = now - speedWindowStart
                                 if (elapsed >= 1000L) {
                                     val speed = speedBytes * 1000L / elapsed
+                                    val remaining = (playFile.size - totalWritten).coerceAtLeast(0L)
+                                    val eta = if (speed > 0L) remaining * 1000L / speed else -1L
                                     runCatching {
-                                        downloadDao.updateProgress(packageName, fileProgress, speed, 0L)
+                                        downloadDao.updateProgress(packageName, fileProgress, speed, eta)
                                     }
                                     speedBytes = 0L
                                     speedWindowStart = now
