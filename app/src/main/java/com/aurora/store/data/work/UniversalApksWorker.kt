@@ -263,7 +263,9 @@ class UniversalApksWorker @AssistedInject constructor(
             return Result.failure()
         }
 
-        Log.i(TAG, "Collected ${collectedFiles.size} unique files for $packageName")
+        // Remove density/locale splits that weren't selected by the user
+        filterCollectedFiles(collectedFiles)
+        Log.i(TAG, "After filter: ${collectedFiles.size} files for $packageName (${collectedFiles.keys.joinToString()})")
 
         // Step 2: Download all unique files
         val downloadDir = File(context.cacheDir, "Downloads/$packageName/$versionCode/universal")
@@ -383,6 +385,43 @@ class UniversalApksWorker @AssistedInject constructor(
     }
 
     /**
+     * Removes density and locale config splits that the user did NOT select.
+     * Keeps base.apk, ABI splits, DF splits, and any unrecognised split type unchanged.
+     *
+     * Split name patterns: "config.arm64_v8a.apk", "config.xxxhdpi.apk", "config.ru.apk",
+     * "split_config.xxhdpi.apk", "df_feature.apk", "base.apk"
+     */
+    private fun filterCollectedFiles(files: LinkedHashMap<String, PlayFile>) {
+        val wantedDensityLabels = selectedDensities.mapNotNull { DENSITY_LABEL[it] }.toSet()
+        // ABI identifiers as they appear inside split file names (dashes → underscores)
+        val abiFileIds = ALL_ABIS.map { it.replace("-", "_") }.toSet()
+
+        files.entries.removeIf { (name, _) ->
+            // Extract "XYZ" from "config.XYZ.apk" or "split_config.XYZ.apk"
+            val configId = Regex("config\\.([^.]+)\\.apk").find(name)?.groupValues?.get(1)
+                ?: return@removeIf false  // base.apk, df_*.apk, etc. — always keep
+
+            when {
+                // ABI split: always keep (already filtered by which configs we purchased)
+                abiFileIds.any { configId.equals(it, ignoreCase = true) } -> false
+
+                // Density split: keep only if user selected that density
+                DENSITY_LABEL.values.any { it == configId } ->
+                    configId !in wantedDensityLabels
+
+                // Locale split: keep only if user selected that locale
+                selectedLocales.isNotEmpty() ->
+                    selectedLocales.none { locale ->
+                        configId == locale || configId.startsWith("${locale}_")
+                    }
+
+                // Unknown split type: keep
+                else -> false
+            }
+        }
+    }
+
+    /**
      * Returns the best available output directory for the .apks file.
      * Prefers public Downloads/AuroraStore/ when storage permission is granted,
      * falling back to the app-private external files directory.
@@ -421,13 +460,10 @@ class UniversalApksWorker @AssistedInject constructor(
             val props = (baseProps.clone() as Properties).apply {
                 setProperty("Platforms", abi)
                 setProperty("Screen.Density", density.toString())
-                // Augment the locale list with user-requested locales so the purchase
-                // response includes locale-specific splits for those languages.
+                // Replace device locale with exactly the user-selected locales so the
+                // purchase response only returns splits for those languages.
                 if (selectedLocales.isNotEmpty()) {
-                    val existing = getProperty("Locales", "")
-                        .split(",").filter { it.isNotBlank() }.toMutableSet()
-                    existing.addAll(selectedLocales)
-                    setProperty("Locales", existing.joinToString(","))
+                    setProperty("Locales", selectedLocales.joinToString(","))
                 }
             }
             val authData = authProvider.buildAuthDataWithProperties(accountId, props)
