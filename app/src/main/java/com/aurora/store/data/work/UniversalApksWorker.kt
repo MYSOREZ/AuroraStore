@@ -110,6 +110,7 @@ class UniversalApksWorker @AssistedInject constructor(
         private const val NOTIFICATION_ID_PROGRESS = 603
 
         private const val BUFFER_SIZE = 256 * 1024
+        private const val METADATA_FILENAME = "bundle_info.txt"
 
         // Delay between dispenser calls to avoid rate-limiting (anonymous accounts only)
         private const val DISPENSER_DELAY_MS = 2000L
@@ -331,8 +332,10 @@ class UniversalApksWorker @AssistedInject constructor(
         val tempDir = File(context.cacheDir, "universal_apks_temp").also { it.mkdirs() }
         val tempFile = File(tempDir, "${packageName}_${versionCode}_universal.apks")
 
+        val bundleMetadata = buildBundleMetadata()
+
         runCatching {
-            bundleIntoApks(downloadedFiles, tempFile)
+            bundleIntoApks(downloadedFiles, tempFile, bundleMetadata)
         }.onFailure {
             Log.e(TAG, "Failed to bundle APKS for $packageName", it)
             tempFile.delete()
@@ -681,14 +684,48 @@ class UniversalApksWorker @AssistedInject constructor(
         }
 
     /**
+     * Builds the human-readable metadata text written as [METADATA_FILENAME] into the bundle.
+     * Lists selected ABIs, locales, densities, and whether dynamic features are included.
+     */
+    private fun buildBundleMetadata(): String {
+        val abis = ALL_ABIS.filter { it in selectedAbis }.joinToString(", ")
+        val locales = selectedLocales.map { it.uppercase() }.joinToString(", ")
+            .ifEmpty { "—" }
+        val densities = ALL_DENSITIES
+            .filter { it in selectedDensities }
+            .mapNotNull { DENSITY_LABEL[it] }
+            .joinToString(", ")
+            .ifEmpty { "—" }
+        val dfs = if (includeDfs) "да" else "нет"
+        return buildString {
+            appendLine("$packageName $versionCode")
+            appendLine()
+            appendLine("Архитектура: $abis.")
+            appendLine("Локаль: $locales.")
+            appendLine("Размер экрана: $densities.")
+            append("Динамические функции: $dfs.")
+        }
+    }
+
+    /**
      * Packs all [files] into a ZIP at [output] using maximum compression.
      * Flat layout — all APKs at the archive root for SAI / bundletool compatibility.
+     * An optional [metadata] string is written as [METADATA_FILENAME] for reference; it is
+     * ignored by installers since they only look for .apk entries.
      */
-    private suspend fun bundleIntoApks(files: List<File>, output: File) =
-        withContext(Dispatchers.IO) {
+    private suspend fun bundleIntoApks(
+        files: List<File>,
+        output: File,
+        metadata: String? = null
+    ) = withContext(Dispatchers.IO) {
             val buffer = ByteArray(BUFFER_SIZE)
             ZipOutputStream(FileOutputStream(output).buffered(BUFFER_SIZE)).use { zip ->
                 zip.setLevel(Deflater.BEST_COMPRESSION)
+                if (metadata != null) {
+                    zip.putNextEntry(ZipEntry(METADATA_FILENAME))
+                    zip.write(metadata.toByteArray(Charsets.UTF_8))
+                    zip.closeEntry()
+                }
                 for (file in files) {
                     zip.putNextEntry(ZipEntry(file.name))
                     file.inputStream().buffered(BUFFER_SIZE).use { input ->
