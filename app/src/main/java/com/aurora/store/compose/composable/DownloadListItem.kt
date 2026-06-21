@@ -35,7 +35,13 @@ import com.aurora.store.util.CommonUtil.getETAString
 fun DownloadListItem(modifier: Modifier = Modifier, download: Download, onClick: () -> Unit = {}) {
     val context = LocalContext.current
 
-    val statusLine = stringResource(download.status.localized)
+    val statusLine = when {
+        download.isUniversalApks && download.status == DownloadStatus.PURCHASING ->
+            stringResource(R.string.universal_apks_gathering)
+        download.isUniversalApks && download.status == DownloadStatus.DOWNLOADING ->
+            stringResource(R.string.universal_apks_downloading)
+        else -> stringResource(download.status.localized)
+    }
     val tertiaryLine = if (download.status in DownloadStatus.running) {
         val progress = "${download.progress}%"
         val speed = "${Formatter.formatShortFileSize(context, download.speed)}/s"
