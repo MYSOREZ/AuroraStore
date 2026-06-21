@@ -477,6 +477,7 @@ private fun ScreenContentApp(
                         primaryActionDisplayName = stringResource(R.string.action_update),
                         secondaryActionDisplayName = stringResource(R.string.action_uninstall),
                         onPrimaryAction = ::onInstall,
+                        onPrimaryActionLongClick = { showUniversalApksSheet = true },
                         onSecondaryAction = onUninstall
                     )
                 }
@@ -509,6 +510,7 @@ private fun ScreenContentApp(
                         isPrimaryActionEnabled = canAcquire,
                         isSecondaryActionEnabled = canAcquire,
                         onPrimaryAction = ::onInstall,
+                        onPrimaryActionLongClick = { showUniversalApksSheet = true },
                         onSecondaryAction = { showExtraPane(ExtraScreen.ManualDownload) }
                     )
                 }
