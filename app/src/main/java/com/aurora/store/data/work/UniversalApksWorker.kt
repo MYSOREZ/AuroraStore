@@ -250,12 +250,31 @@ class UniversalApksWorker @AssistedInject constructor(
             if (isAnonymous) delay(DISPENSER_DELAY_MS)
         }
 
-        // Density sweep: always use arm64-v8a so density/locale splits are collected even when
-        // the user-selected ABI (e.g. x86) doesn't exist for this app.
+        // Density sweep: always use arm64-v8a so density splits are collected regardless of
+        // which ABI the user selected.
         val sweepAbi = "arm64-v8a"
         for (density in ALL_DENSITIES.filter { it in selectedDensities && it != 640 }) {
             if (isStopped) break
             collectForConfig(collectedFiles, baseProps, abi = sweepAbi, density = density, isAnonymous = isAnonymous)
+            if (isAnonymous) delay(DISPENSER_DELAY_MS)
+        }
+
+        // Locale sweep: Play returns at most ONE locale split per purchase call.
+        // Make a dedicated call per language so every selected locale is collected.
+        // Skip locales whose split is already in collected (e.g. device locale from Config 0).
+        for (locale in selectedLocales.filter { it.isNotBlank() }) {
+            if (isStopped) break
+            val alreadyHave = collectedFiles.keys.any { name ->
+                val id = configIdFromName(name) ?: return@any false
+                id == locale || id.startsWith("${locale}_")
+            }
+            if (alreadyHave) continue
+            collectForConfig(
+                collectedFiles, baseProps,
+                abi = sweepAbi, density = 640,
+                isAnonymous = isAnonymous,
+                localeOverride = locale
+            )
             if (isAnonymous) delay(DISPENSER_DELAY_MS)
         }
 
@@ -527,27 +546,31 @@ class UniversalApksWorker @AssistedInject constructor(
         }
 
     /**
-     * Builds an AuthData for [abi] + [density] device config and purchases splits.
-     * Results are merged into [collected] (deduplicated by file name).
+     * Builds an AuthData for [abi] + [density] (+ optional [localeOverride]) device config
+     * and purchases splits. Results are merged into [collected] (deduplicated by file name).
+     *
+     * Play API returns at most ONE locale split per purchase — the best match for the device's
+     * Locales property. To collect splits for multiple languages, call this function once per
+     * locale with [localeOverride] set to the target language code.
+     * When [localeOverride] is null the device's native locale applies (used for ABI/density
+     * sweeps where locale splits are not the goal).
      */
     private suspend fun collectForConfig(
         collected: LinkedHashMap<String, PlayFile>,
         baseProps: Properties,
         abi: String,
         density: Int,
-        isAnonymous: Boolean
+        isAnonymous: Boolean,
+        localeOverride: String? = null
     ) {
-        val label = "$abi @ ${density}dpi"
+        val label = if (localeOverride != null) "$abi @ ${density}dpi / $localeOverride"
+                    else "$abi @ ${density}dpi"
         runCatching {
             @Suppress("UNCHECKED_CAST")
             val props = (baseProps.clone() as Properties).apply {
                 setProperty("Platforms", abi)
                 setProperty("Screen.Density", density.toString())
-                // Replace device locale with exactly the user-selected locales so the
-                // purchase response only returns splits for those languages.
-                if (selectedLocales.isNotEmpty()) {
-                    setProperty("Locales", selectedLocales.joinToString(","))
-                }
+                if (localeOverride != null) setProperty("Locales", localeOverride)
             }
             val authData = authProvider.buildAuthDataWithProperties(accountId, props)
             val purchaseHelper = PurchaseHelper(authData).using(httpClient)
