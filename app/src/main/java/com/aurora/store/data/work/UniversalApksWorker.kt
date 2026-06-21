@@ -386,12 +386,14 @@ class UniversalApksWorker @AssistedInject constructor(
     }
 
     /**
-     * Removes config splits for ABI, density, or locale that the user did NOT select,
-     * but ONLY when at least one of the requested type was actually collected.
+     * Removes config splits for ABI, density, or locale that the user did NOT select.
      *
-     * Fallback rule: if no requested ABI split was returned (e.g. app has no x86 build),
-     * keep whatever ABI splits exist so the bundle still works. Same logic applies to
-     * density and locale splits — a partial bundle beats an empty one.
+     * ABI: always filtered strictly — only user-selected architectures are kept.
+     *   Arm64 collected incidentally during the density sweep is removed if not selected.
+     *   If no selected ABI exists for this app, no ABI split is included (base.apk only).
+     *
+     * Density/Locale: smart fallback — only filtered when at least one requested item was
+     *   actually collected; otherwise whatever exists is kept so the bundle remains usable.
      *
      * Keeps base.apk, df_*.apk, and any unrecognised split type unchanged.
      */
@@ -400,12 +402,8 @@ class UniversalApksWorker @AssistedInject constructor(
         val allAbiFileIds = ALL_ABIS.map { it.replace("-", "_") }.toSet()
         val selectedAbiFileIds = selectedAbis.map { it.replace("-", "_") }.toSet()
 
-        // Pre-scan to see which requested split types we actually got
-        val gotRequestedAbi = files.keys.any { name ->
-            val id = configIdFromName(name) ?: return@any false
-            allAbiFileIds.any { id.equals(it, ignoreCase = true) } &&
-                selectedAbiFileIds.any { id.equals(it, ignoreCase = true) }
-        }
+        // Pre-scan to see which requested split types we actually got (used for density/locale
+        // smart-fallback: keep whatever exists if none of the requested type was returned)
         val gotRequestedDensity = files.keys.any { name ->
             val id = configIdFromName(name) ?: return@any false
             id in wantedDensityLabels
@@ -417,15 +415,17 @@ class UniversalApksWorker @AssistedInject constructor(
                 selectedLocales.any { loc -> id == loc || id.startsWith("${loc}_") }
         }
 
-        Log.i(TAG, "Filter state: gotAbi=$gotRequestedAbi gotDensity=$gotRequestedDensity gotLocale=$gotRequestedLocale")
+        Log.i(TAG, "Filter state: gotDensity=$gotRequestedDensity gotLocale=$gotRequestedLocale")
 
         files.entries.removeIf { (name, _) ->
             val configId = configIdFromName(name) ?: return@removeIf false
 
             when {
-                // ABI split: filter only when we got at least one requested ABI
+                // ABI split: always filter strictly to user selection — no fallback.
+                // If the user didn't select arm64, arm64 must not appear even if it was
+                // collected incidentally during the density sweep.
                 allAbiFileIds.any { configId.equals(it, ignoreCase = true) } ->
-                    gotRequestedAbi && selectedAbiFileIds.none { configId.equals(it, ignoreCase = true) }
+                    selectedAbiFileIds.none { configId.equals(it, ignoreCase = true) }
 
                 // Density split: filter only when we got at least one requested density
                 DENSITY_LABEL.values.any { it == configId } ->
