@@ -26,8 +26,12 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.OutOfQuotaPolicy
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Environment
 import com.aurora.extensions.isPAndAbove
 import com.aurora.extensions.isQAndAbove
+import com.aurora.extensions.isRAndAbove
 import com.aurora.gplayapi.data.models.App
 import com.aurora.gplayapi.data.models.PlayFile
 import com.aurora.gplayapi.helpers.PurchaseHelper
@@ -270,16 +274,19 @@ class UniversalApksWorker @AssistedInject constructor(
 
         val downloadedFiles = mutableListOf<File>()
         val total = collectedFiles.size
+        val totalBytes = collectedFiles.values.sumOf { it.size }
         var index = 0
+        var completedBytes = 0L
         for (playFile in collectedFiles.values) {
             if (isStopped) break
             index++
-            val progress = (index * 90 / total).coerceAtLeast(1)
             notifyProgress(context.getString(R.string.universal_apks_downloading) + " ($index/$total)")
-            runCatching { downloadDao.updateProgress(packageName, progress, 0L, -1L) }
             runCatching {
-                val localFile = downloadFile(playFile, downloadDir, progress)
-                if (localFile != null) downloadedFiles.add(localFile)
+                val localFile = downloadFile(playFile, downloadDir, totalBytes, completedBytes)
+                if (localFile != null) {
+                    downloadedFiles.add(localFile)
+                    completedBytes += playFile.size
+                }
             }.onFailure {
                 Log.w(TAG, "Failed to download ${playFile.name}: ${it.message}")
             }
@@ -297,9 +304,9 @@ class UniversalApksWorker @AssistedInject constructor(
         notifyProgress(context.getString(R.string.universal_apks_bundling))
         runCatching { downloadDao.updateProgress(packageName, 95, 0L, 0L) }
 
-        val outputDir = context.getExternalFilesDir("UniversalApks")?.also { it.mkdirs() }
+        val outputDir = resolveOutputDir()?.also { it.mkdirs() }
             ?: run {
-                Log.e(TAG, "Cannot access external files dir")
+                Log.e(TAG, "Cannot access output directory")
                 finalizeDownloadRow(success = false)
                 notifyResult(success = false)
                 return Result.failure()
@@ -364,15 +371,37 @@ class UniversalApksWorker @AssistedInject constructor(
     }
 
     /**
-     * Updates the [Download] row to its final state. Uses [DownloadStatus.INSTALLED] on success
-     * so the row stays in the history with a green checkmark without triggering the installer
-     * (the Universal APKS file lives in a different directory than [canInstall] checks).
+     * Updates the [Download] row to its final state. Uses [DownloadStatus.COMPLETED] on success
+     * so the row stays in history with a green checkmark. COMPLETED is correct — nothing is
+     * installed; the .apks bundle is a download artifact, not an installed app.
      */
     private suspend fun finalizeDownloadRow(success: Boolean) {
         runCatching {
-            val status = if (success) DownloadStatus.INSTALLED else DownloadStatus.FAILED
+            val status = if (success) DownloadStatus.COMPLETED else DownloadStatus.FAILED
             downloadDao.updateStatus(packageName, status)
         }.onFailure { Log.w(TAG, "Could not finalize download row: ${it.message}") }
+    }
+
+    /**
+     * Returns the best available output directory for the .apks file.
+     * Prefers public Downloads/AuroraStore/ when storage permission is granted,
+     * falling back to the app-private external files directory.
+     */
+    private fun resolveOutputDir(): File? {
+        val canWritePublic = if (isRAndAbove) {
+            Environment.isExternalStorageManager()
+        } else {
+            context.checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) ==
+                PackageManager.PERMISSION_GRANTED
+        }
+        if (canWritePublic) {
+            val publicDir = File(
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+                "AuroraStore"
+            )
+            if (publicDir.mkdirs() || publicDir.exists()) return publicDir
+        }
+        return context.getExternalFilesDir("UniversalApks")
     }
 
     /**
@@ -428,7 +457,10 @@ class UniversalApksWorker @AssistedInject constructor(
      * Returns the completed [File] or null if all attempts fail or the URL returns an
      * unrecoverable HTTP error (403/404/410).
      */
-    private suspend fun downloadFile(playFile: PlayFile, dir: File, fileProgress: Int = 0): File? =
+    private suspend fun downloadFile(
+        playFile: PlayFile, dir: File,
+        totalJobBytes: Long = 0L, completedJobBytes: Long = 0L
+    ): File? =
         withContext(Dispatchers.IO) {
             val targetFile = File(dir, playFile.name)
             if (targetFile.exists() && playFile.size > 0 && targetFile.length() == playFile.size) {
@@ -470,10 +502,14 @@ class UniversalApksWorker @AssistedInject constructor(
                                 val elapsed = now - speedWindowStart
                                 if (elapsed >= 1000L) {
                                     val speed = speedBytes * 1000L / elapsed
-                                    val remaining = (playFile.size - totalWritten).coerceAtLeast(0L)
+                                    val overallWritten = completedJobBytes + totalWritten
+                                    val progress = if (totalJobBytes > 0) {
+                                        (overallWritten * 100L / totalJobBytes).toInt().coerceIn(1, 99)
+                                    } else 1
+                                    val remaining = (totalJobBytes - overallWritten).coerceAtLeast(0L)
                                     val eta = if (speed > 0L) remaining * 1000L / speed else -1L
                                     runCatching {
-                                        downloadDao.updateProgress(packageName, fileProgress, speed, eta)
+                                        downloadDao.updateProgress(packageName, progress, speed, eta)
                                     }
                                     speedBytes = 0L
                                     speedWindowStart = now
@@ -577,7 +613,10 @@ class UniversalApksWorker @AssistedInject constructor(
             .setAutoCancel(true)
 
         if (success && outputFile != null) {
-            builder.setContentText(context.getString(R.string.universal_apks_notification_complete))
+            val savedTo = outputFile.parentFile?.absolutePath ?: outputFile.absolutePath
+            val completedText = context.getString(R.string.universal_apks_notification_complete)
+            builder.setContentText(completedText)
+            builder.setStyle(NotificationCompat.BigTextStyle().bigText("$completedText\n$savedTo"))
 
             // Share action so the user can open / send the .apks file
             val uri: Uri = FileProvider.getUriForFile(
