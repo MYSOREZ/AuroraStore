@@ -26,6 +26,7 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.OutOfQuotaPolicy
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
+import com.aurora.extensions.isPAndAbove
 import com.aurora.extensions.isQAndAbove
 import com.aurora.gplayapi.data.models.App
 import com.aurora.gplayapi.data.models.PlayFile
@@ -42,6 +43,8 @@ import com.aurora.store.data.providers.AuthProvider
 import com.aurora.store.data.providers.NativeDeviceInfoProvider
 import com.aurora.store.data.room.download.Download
 import com.aurora.store.data.room.download.DownloadDao
+import com.aurora.store.util.CertUtil
+import com.aurora.store.util.PackageUtil
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
 import java.io.File
@@ -177,14 +180,23 @@ class UniversalApksWorker @AssistedInject constructor(
         // Step 1: Collect unique files across all device configs
         val collectedFiles = LinkedHashMap<String, PlayFile>()
 
-        // First purchase: use the EXISTING saved authData (guaranteed to work, no extra call)
+        // Config 0: use the SPECIFIC account's saved AuthData — no dispenser call needed.
+        // Match DownloadWorker: pass the cert hash on Android P+ for installed apps so
+        // key-rotation apps return valid download URLs (403 without it on some titles).
         runCatching {
-            val savedAuth = authProvider.authData
-                ?: throw IllegalStateException("No saved authData")
-            val files = PurchaseHelper(savedAuth).using(httpClient)
-                .purchase(packageName, versionCode, offerType)
-            files.forEach { collectedFiles[it.name] = it }
-            Log.i(TAG, "Config 0 (saved): got ${files.size} files")
+            val savedAuth = authProvider.getAuthData(accountId)
+                ?: throw IllegalStateException("No auth data for account $accountId")
+            val purchaseHelper = PurchaseHelper(savedAuth).using(httpClient)
+            val files = if (isPAndAbove && PackageUtil.isInstalled(context, packageName)) {
+                purchaseHelper.purchase(
+                    packageName, versionCode, offerType,
+                    CertUtil.getEncodedCertificateHashes(context, packageName).lastOrNull() ?: ""
+                )
+            } else {
+                purchaseHelper.purchase(packageName, versionCode, offerType)
+            }
+            files.filter { it.url.isNotBlank() }.forEach { collectedFiles[it.name] = it }
+            Log.i(TAG, "Config 0 (saved): got ${files.size} files, ${collectedFiles.size} with URLs")
         }.onFailure { Log.w(TAG, "Config 0 (saved) failed: ${it.message}") }
 
         // Subsequent purchases: one per ABI config (all at max density to also catch xxxhdpi)
@@ -360,7 +372,8 @@ class UniversalApksWorker @AssistedInject constructor(
             val authData = authProvider.buildAuthDataWithProperties(accountId, props)
             val files = PurchaseHelper(authData).using(httpClient)
                 .purchase(packageName, versionCode, offerType)
-            val newFiles = files.filterNot { collected.containsKey(it.name) }
+            val newFiles = files.filter { it.url.isNotBlank() }
+                .filterNot { collected.containsKey(it.name) }
             newFiles.forEach { collected[it.name] = it }
             Log.i(TAG, "Config $label: got ${files.size} files, ${newFiles.size} new")
         }.onFailure {
