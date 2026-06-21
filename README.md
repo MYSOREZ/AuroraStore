@@ -123,32 +123,55 @@ devices with unusual hardware.
 **How it works**
 
 Aurora already downloads device-matched splits (one ABI, one density, current locale). To collect
-all variants the worker makes up to ten purchase requests with different virtual device profiles:
-one per selected ABI at the highest density, then one per selected density using arm64-v8a (most
-widely supported). Results are deduplicated by filename and filtered to exactly what the user chose.
+all variants the worker makes purchase requests with different virtual device profiles:
+- one per selected ABI at the highest density (640 dpi)
+- one per selected density using arm64-v8a
+- one per selected language (locale sweep)
+
+Results are deduplicated by filename and filtered to exactly what the user chose.
 
 **Key implementation details**
 
 - `UniversalApksWorker` — new `@HiltWorker` that drives the whole pipeline:
-  purchase → deduplicate → download → ZIP → publish
+  purchase → deduplicate → filter → download → ZIP → publish
 - `AuthProvider.buildAuthDataWithProperties()` — builds a throwaway `AuthData` from custom device
   properties without touching saved account settings or triggering an app restart
+- `AuthProvider.buildAuthDataReusingToken()` — clones an `AuthData` with new device properties
+  but the **same auth token** (no dispenser call). Used by the locale sweep to avoid N dispenser
+  calls that would hit rate limits (HTTP 429) and silently skip languages / ABI splits
 - Split filtering: ABI is always filtered strictly (no arm64 fallback if not selected); density and
   locale use a smart fallback (keep whatever exists if none of the requested type was returned)
 - Output saved to `Download/AuroraStore/` via `MediaStore.Downloads` on Android 10+ (no special
   permission required); falls back to app-private external dir on older devices
 - Progress ring, speed, and ETA are byte-accurate across all files in the job
+- Download retry: each file retries up to 3 times with Range resume (no re-downloading from scratch)
+- `bundle_info.txt` written inside the `.apks` ZIP listing the **actually downloaded** splits
+  (architectures, locales, densities, dynamic features) — ignored by installers
 - `Download.isUniversalApks` flag (DB migration 10 → 11) prevents the app details screen from
   misreading a completed bundle as a pending install and from deleting the download row
-- GitHub Actions workflow added (`.github/workflows/build.yml`) — builds a debug APK on every
-  push to `main`, `master`, or `claude/**` branches
+- Downloads list shows "Сбор сплитов" / "Загрузка" instead of "Подготовка к установке" for
+  Universal APKS entries
+- GitHub Actions workflow (`.github/workflows/build.yml`) builds a debug APK on every push to
+  `main`, `master`, or `claude/**` branches
 
 **Entry points**
 
-- App details screen → "Download Universal APKS" button (shown for any downloadable app)
-- Manual download screen → same button below the version/architecture fields
+- App details screen → three-dot menu → "Скачать Universal APKS"
 - Configuration sheet (`UniversalApksConfigSheet`) lets the user pick architectures, screen
   densities, languages, and whether to include dynamic feature modules before starting
+
+**Bugs fixed during development**
+
+| Bug | Fix |
+|-----|-----|
+| arm64 включался в бандл даже если не выбран (сбор density-сплитов использовал arm64-v8a) | Строгая фильтрация ABI без fallback |
+| В списке загрузок показывалось "Подготовка к установке" | Override статуса по флагу `isUniversalApks` |
+| Интерфейс отображался на английском вместо русского | Добавлены переводы в `values-ru/strings.xml` |
+| Собирался только один локаль-сплит вместо всех выбранных | Отдельный вызов purchase на каждый язык |
+| Диспенсер отвечал 429 при выборе многих языков — языки и x86_64 пропускались | `buildAuthDataReusingToken()` — один вызов диспенсера на весь locale sweep |
+| `bundle_info.txt` показывал выбранные опции, а не то что реально скачалось | `buildBundleMetadata()` парсит имена файлов из `downloadedFiles` |
+| Страница приложения показывала "Установка" после завершения бандла | Проверка `isUniversalApks` в `stateFromDownload()` |
+| Запись Universal APKS исчезала из списка загрузок | `fetchAppDetails()` не удаляет строки с `isUniversalApks = true` |
 
 ## Project references
 
