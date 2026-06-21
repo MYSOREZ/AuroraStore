@@ -25,13 +25,17 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      # signing.properties must be in the repo root — that is where
+      # File("signing.properties") in app/build.gradle.kts resolves to.
+      # STORE_FILE is resolved via Gradle file() relative to the :app module dir,
+      # so "testkey.jks" points to app/testkey.jks which is already in the repo.
       - name: Set up signing (AOSP test key)
         run: |
           printf 'KEY_ALIAS=testkey\nKEY_PASSWORD=testkey\nSTORE_FILE=testkey.jks\n' \
-            > app/signing.properties
+            > signing.properties
 
-      - name: Build all APKs
-        run: ./gradlew assembleVanillaDebug assembleVanillaNightly assembleVanillaRelease
+      - name: Build debug APK
+        run: ./gradlew assembleVanillaDebug
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
@@ -40,12 +44,18 @@ jobs:
           path: app/build/outputs/apk/vanilla/debug/app-vanilla-debug.apk
           retention-days: 14
 
+      - name: Build nightly APK
+        run: ./gradlew assembleVanillaNightly
+
       - name: Upload nightly APK
         uses: actions/upload-artifact@v4
         with:
           name: app-vanilla-nightly
           path: app/build/outputs/apk/vanilla/nightly/app-vanilla-nightly.apk
           retention-days: 14
+
+      - name: Build release APK
+        run: ./gradlew assembleVanillaRelease
 
       - name: Upload release APK
         uses: actions/upload-artifact@v4
