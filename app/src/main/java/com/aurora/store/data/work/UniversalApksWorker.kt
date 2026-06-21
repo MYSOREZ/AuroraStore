@@ -385,16 +385,20 @@ class UniversalApksWorker @AssistedInject constructor(
     }
 
     /**
-     * Removes density and locale config splits that the user did NOT select.
-     * Keeps base.apk, ABI splits, DF splits, and any unrecognised split type unchanged.
+     * Removes config splits for ABI, density, or locale that the user did NOT select.
+     * Keeps base.apk, df_*.apk, and any unrecognised split type unchanged.
      *
      * Split name patterns: "config.arm64_v8a.apk", "config.xxxhdpi.apk", "config.ru.apk",
      * "split_config.xxhdpi.apk", "df_feature.apk", "base.apk"
+     *
+     * Note: Config 0 always uses the device's saved authData, so it returns the device's
+     * native ABI and locale splits regardless of user selection — those are caught here.
      */
     private fun filterCollectedFiles(files: LinkedHashMap<String, PlayFile>) {
         val wantedDensityLabels = selectedDensities.mapNotNull { DENSITY_LABEL[it] }.toSet()
-        // ABI identifiers as they appear inside split file names (dashes → underscores)
-        val abiFileIds = ALL_ABIS.map { it.replace("-", "_") }.toSet()
+        // ABI ids as they appear in file names (dashes replaced with underscores)
+        val allAbiFileIds = ALL_ABIS.map { it.replace("-", "_") }.toSet()
+        val selectedAbiFileIds = selectedAbis.map { it.replace("-", "_") }.toSet()
 
         files.entries.removeIf { (name, _) ->
             // Extract "XYZ" from "config.XYZ.apk" or "split_config.XYZ.apk"
@@ -402,8 +406,10 @@ class UniversalApksWorker @AssistedInject constructor(
                 ?: return@removeIf false  // base.apk, df_*.apk, etc. — always keep
 
             when {
-                // ABI split: always keep (already filtered by which configs we purchased)
-                abiFileIds.any { configId.equals(it, ignoreCase = true) } -> false
+                // ABI split: keep only if user selected that ABI
+                allAbiFileIds.any { configId.equals(it, ignoreCase = true) } ->
+                    selectedAbiFileIds.isNotEmpty() &&
+                        selectedAbiFileIds.none { configId.equals(it, ignoreCase = true) }
 
                 // Density split: keep only if user selected that density
                 DENSITY_LABEL.values.any { it == configId } ->
