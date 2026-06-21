@@ -34,14 +34,19 @@ import com.aurora.gplayapi.network.IHttpClient
 import com.aurora.Constants
 import com.aurora.store.R
 import com.aurora.store.data.AccountRepository
+import com.aurora.store.data.helper.DownloadHelper
 import com.aurora.store.data.model.AccountType
+import com.aurora.store.data.model.DownloadStatus
 import com.aurora.store.data.network.HttpClient
 import com.aurora.store.data.providers.AuthProvider
 import com.aurora.store.data.providers.NativeDeviceInfoProvider
+import com.aurora.store.data.room.download.Download
+import com.aurora.store.data.room.download.DownloadDao
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
 import java.io.File
 import java.io.FileOutputStream
+import java.util.Date
 import java.util.Properties
 import java.util.zip.Deflater
 import java.util.zip.ZipEntry
@@ -62,12 +67,16 @@ import kotlinx.coroutines.withContext
  * Rate-limiting mitigation: the first purchase reuses the existing saved AuthData (no extra
  * network call). Subsequent purchases build a new AuthData; for anonymous accounts this calls
  * the dispenser — failures are caught and logged rather than aborting the whole job.
+ *
+ * The worker inserts a [Download] row into Room at startup so the app icon shows a progress
+ * ring and the entry appears in the downloads list, matching the existing download UX.
  */
 @HiltWorker
 class UniversalApksWorker @AssistedInject constructor(
     private val authProvider: AuthProvider,
     private val accountRepository: AccountRepository,
     private val httpClient: IHttpClient,
+    private val downloadDao: DownloadDao,
     @Assisted private val context: Context,
     @Assisted workerParams: WorkerParameters
 ) : CoroutineWorker(context, workerParams) {
@@ -80,6 +89,7 @@ class UniversalApksWorker @AssistedInject constructor(
         private const val OFFER_TYPE = "OFFER_TYPE"
         private const val ACCOUNT_ID = "ACCOUNT_ID"
         private const val DISPLAY_NAME = "DISPLAY_NAME"
+        private const val ICON_URL = "ICON_URL"
 
         private const val NOTIFICATION_ID_FGS = 601
         private const val NOTIFICATION_ID_RESULT = 602
@@ -114,16 +124,18 @@ class UniversalApksWorker @AssistedInject constructor(
                 .putInt(OFFER_TYPE, app.offerType)
                 .putString(ACCOUNT_ID, accountId)
                 .putString(DISPLAY_NAME, app.displayName)
+                .putString(ICON_URL, app.iconArtwork.url)
                 .build()
 
             val request = OneTimeWorkRequestBuilder<UniversalApksWorker>()
                 .setInputData(data)
                 .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
                 .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
+                .addTag("${DownloadHelper.PACKAGE_NAME}:${app.packageName}")
                 .build()
 
             WorkManager.getInstance(context).enqueueUniqueWork(
-                "$TAG/${ app.packageName}",
+                "$TAG/${app.packageName}",
                 ExistingWorkPolicy.KEEP,
                 request
             )
@@ -138,6 +150,7 @@ class UniversalApksWorker @AssistedInject constructor(
     private val offerType by lazy { inputData.getInt(OFFER_TYPE, 0) }
     private val accountId by lazy { inputData.getString(ACCOUNT_ID)!! }
     private val displayName by lazy { inputData.getString(DISPLAY_NAME) ?: packageName }
+    private val iconUrl by lazy { inputData.getString(ICON_URL).orEmpty() }
 
     override suspend fun doWork(): Result {
         return try {
@@ -147,14 +160,18 @@ class UniversalApksWorker @AssistedInject constructor(
         } catch (exception: Exception) {
             // Never die silently: surface the reason so the user knows what happened.
             Log.e(TAG, "Universal APKS job crashed for $packageName", exception)
+            finalizeDownloadRow(success = false)
             notifyResult(success = false, errorMessage = exception.message)
             Result.failure()
         }
     }
 
     private suspend fun runJob(): Result {
+        // Register with the downloads system so the progress ring appears and the entry
+        // shows up in the downloads list, matching the existing download UX.
+        insertDownloadRow()
+
         enterForeground(context.getString(R.string.universal_apks_gathering))
-        // FGS notification is silent/ongoing and easy to miss; post a visible one too.
         notifyProgress(context.getString(R.string.universal_apks_gathering))
 
         // Step 1: Collect unique files across all device configs
@@ -180,7 +197,7 @@ class UniversalApksWorker @AssistedInject constructor(
                 collectedFiles,
                 baseProps,
                 abi = abi,
-                density = 640,  // xxxhdpi — highest density to capture top-tier asset split
+                density = 640,
                 isAnonymous = isAnonymous
             )
             if (isAnonymous) delay(DISPENSER_DELAY_MS)
@@ -189,7 +206,6 @@ class UniversalApksWorker @AssistedInject constructor(
         // Density sweep: arm64-v8a at each density to catch remaining density-specific splits
         for (density in TARGET_DENSITIES) {
             if (isStopped) break
-            // Skip 640 — already covered by the ABI sweep above
             if (density == 640) continue
             collectForConfig(
                 collectedFiles,
@@ -203,6 +219,7 @@ class UniversalApksWorker @AssistedInject constructor(
 
         if (collectedFiles.isEmpty()) {
             Log.e(TAG, "No files collected for $packageName — all purchases failed")
+            finalizeDownloadRow(success = false)
             notifyResult(success = false)
             return Result.failure()
         }
@@ -221,7 +238,9 @@ class UniversalApksWorker @AssistedInject constructor(
         for (playFile in collectedFiles.values) {
             if (isStopped) break
             index++
+            val progress = (index * 90 / total).coerceAtLeast(1)
             notifyProgress(context.getString(R.string.universal_apks_downloading) + " ($index/$total)")
+            runCatching { downloadDao.updateProgress(packageName, progress, 0L, 0L) }
             runCatching {
                 val localFile = downloadFile(playFile, downloadDir)
                 if (localFile != null) downloadedFiles.add(localFile)
@@ -232,6 +251,7 @@ class UniversalApksWorker @AssistedInject constructor(
 
         if (downloadedFiles.isEmpty()) {
             Log.e(TAG, "No files downloaded for $packageName")
+            finalizeDownloadRow(success = false)
             notifyResult(success = false)
             return Result.failure()
         }
@@ -239,10 +259,12 @@ class UniversalApksWorker @AssistedInject constructor(
         // Step 3: Bundle into .apks ZIP
         enterForeground(context.getString(R.string.universal_apks_bundling))
         notifyProgress(context.getString(R.string.universal_apks_bundling))
+        runCatching { downloadDao.updateProgress(packageName, 95, 0L, 0L) }
 
         val outputDir = context.getExternalFilesDir("UniversalApks")?.also { it.mkdirs() }
             ?: run {
                 Log.e(TAG, "Cannot access external files dir")
+                finalizeDownloadRow(success = false)
                 notifyResult(success = false)
                 return Result.failure()
             }
@@ -254,17 +276,68 @@ class UniversalApksWorker @AssistedInject constructor(
         }.onFailure {
             Log.e(TAG, "Failed to bundle APKS for $packageName", it)
             outputFile.delete()
+            finalizeDownloadRow(success = false)
             notifyResult(success = false)
             return Result.failure()
         }
 
         Log.i(TAG, "Universal APKS ready: ${outputFile.absolutePath} (${outputFile.length()} bytes)")
+        finalizeDownloadRow(success = true)
         notifyResult(success = true, outputFile = outputFile)
         return Result.success()
     }
 
     override suspend fun getForegroundInfo(): ForegroundInfo =
         buildForegroundInfo(context.getString(R.string.universal_apks_gathering))
+
+    /**
+     * Inserts a [Download] row so the app-icon progress ring and downloads list show this job.
+     * If an active (running/purchasing/verifying) download already exists for the same package
+     * we leave it untouched — the Universal APKS job still proceeds but won't overwrite the
+     * in-flight record.
+     */
+    private suspend fun insertDownloadRow() {
+        runCatching {
+            val existing = runCatching { downloadDao.getDownload(packageName) }.getOrNull()
+            if (existing?.isActive == true) {
+                Log.i(TAG, "Active download exists for $packageName, skipping row insert")
+                return
+            }
+            downloadDao.insert(
+                Download(
+                    packageName = packageName,
+                    versionCode = versionCode,
+                    offerType = offerType,
+                    isInstalled = false,
+                    displayName = displayName,
+                    iconURL = iconUrl,
+                    size = 0L,
+                    id = 0,
+                    status = DownloadStatus.DOWNLOADING,
+                    progress = 0,
+                    speed = 0L,
+                    timeRemaining = 0L,
+                    totalFiles = 0,
+                    downloadedFiles = 0,
+                    fileList = emptyList(),
+                    sharedLibs = emptyList(),
+                    downloadedAt = Date().time
+                )
+            )
+        }.onFailure { Log.w(TAG, "Could not insert download row: ${it.message}") }
+    }
+
+    /**
+     * Updates the [Download] row to its final state. Uses [DownloadStatus.INSTALLED] on success
+     * so the row stays in the history with a green checkmark without triggering the installer
+     * (the Universal APKS file lives in a different directory than [canInstall] checks).
+     */
+    private suspend fun finalizeDownloadRow(success: Boolean) {
+        runCatching {
+            val status = if (success) DownloadStatus.INSTALLED else DownloadStatus.FAILED
+            downloadDao.updateStatus(packageName, status)
+        }.onFailure { Log.w(TAG, "Could not finalize download row: ${it.message}") }
+    }
 
     /**
      * Builds an AuthData for [abi] + [density] device config and purchases splits.
