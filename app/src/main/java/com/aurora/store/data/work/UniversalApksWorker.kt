@@ -48,6 +48,7 @@ import com.aurora.store.data.model.DownloadStatus
 import com.aurora.store.data.network.HttpClient
 import com.aurora.store.data.providers.AuthProvider
 import com.aurora.store.data.providers.NativeDeviceInfoProvider
+import com.aurora.store.data.providers.SpoofProvider
 import com.aurora.store.data.room.download.Download
 import com.aurora.store.data.room.download.DownloadDao
 import com.aurora.store.util.CertUtil
@@ -62,6 +63,7 @@ import java.util.zip.Deflater
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import kotlin.coroutines.cancellation.CancellationException
+import java.util.Locale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -87,6 +89,7 @@ class UniversalApksWorker @AssistedInject constructor(
     private val accountRepository: AccountRepository,
     private val httpClient: IHttpClient,
     private val downloadDao: DownloadDao,
+    private val spoofProvider: SpoofProvider,
     @Assisted private val context: Context,
     @Assisted workerParams: WorkerParameters
 ) : CoroutineWorker(context, workerParams) {
@@ -101,8 +104,8 @@ class UniversalApksWorker @AssistedInject constructor(
         private const val DISPLAY_NAME = "DISPLAY_NAME"
         private const val ICON_URL = "ICON_URL"
         // User-selected config (comma-separated strings / boolean)
-        private const val SELECTED_ABIS = "SELECTED_ABIS"
-        private const val SELECTED_DENSITIES = "SELECTED_DENSITIES"
+        // SELECTED_DEVICES: comma-separated Build.PRODUCT values of device profiles to sweep
+        private const val SELECTED_DEVICES = "SELECTED_DEVICES"
         private const val SELECTED_LOCALES = "SELECTED_LOCALES"
         private const val INCLUDE_DFS = "INCLUDE_DFS"
 
@@ -138,8 +141,7 @@ class UniversalApksWorker @AssistedInject constructor(
             context: Context,
             app: App,
             accountId: String,
-            selectedAbis: Set<String> = setOf("arm64-v8a", "armeabi-v7a"),
-            selectedDensities: Set<Int> = ALL_DENSITIES.toSet(),
+            selectedDeviceProductIds: Set<String>,
             selectedLocales: Set<String> = setOf("en"),
             includeDynamicFeatures: Boolean = true
         ) {
@@ -150,8 +152,7 @@ class UniversalApksWorker @AssistedInject constructor(
                 .putString(ACCOUNT_ID, accountId)
                 .putString(DISPLAY_NAME, app.displayName)
                 .putString(ICON_URL, app.iconArtwork.url)
-                .putString(SELECTED_ABIS, selectedAbis.joinToString(","))
-                .putString(SELECTED_DENSITIES, selectedDensities.joinToString(","))
+                .putString(SELECTED_DEVICES, selectedDeviceProductIds.joinToString(","))
                 .putString(SELECTED_LOCALES, selectedLocales.joinToString(","))
                 .putBoolean(INCLUDE_DFS, includeDynamicFeatures)
                 .build()
@@ -180,15 +181,10 @@ class UniversalApksWorker @AssistedInject constructor(
     private val accountId by lazy { inputData.getString(ACCOUNT_ID)!! }
     private val displayName by lazy { inputData.getString(DISPLAY_NAME) ?: packageName }
     private val iconUrl by lazy { inputData.getString(ICON_URL).orEmpty() }
-    // User's selected config (falls back to sensible defaults if not present)
-    private val selectedAbis by lazy {
-        inputData.getString(SELECTED_ABIS)?.split(",")?.filter { it.isNotBlank() }?.toSet()
-            ?: setOf("arm64-v8a", "armeabi-v7a")
-    }
-    private val selectedDensities by lazy {
-        inputData.getString(SELECTED_DENSITIES)?.split(",")
-            ?.mapNotNull { it.trim().toIntOrNull() }?.toSet()
-            ?: ALL_DENSITIES.toSet()
+    // User's selected config
+    private val selectedDeviceProductIds by lazy {
+        inputData.getString(SELECTED_DEVICES)?.split(",")?.filter { it.isNotBlank() }?.toSet()
+            ?: emptySet()
     }
     private val selectedLocales by lazy {
         inputData.getString(SELECTED_LOCALES)?.split(",")?.filter { it.isNotBlank() }?.toSet()
@@ -242,24 +238,25 @@ class UniversalApksWorker @AssistedInject constructor(
             Log.i(TAG, "Config 0 (saved): got ${files.size} files, ${collectedFiles.size} collected")
         }.onFailure { Log.w(TAG, "Config 0 (saved) failed: ${it.message}") }
 
-        // Subsequent purchases: one per selected ABI (at max density), then density sweep.
-        val baseProps = NativeDeviceInfoProvider.getNativeDeviceProperties(context)
         val isAnonymous = accountRepository.getById(accountId)?.type == AccountType.ANONYMOUS
 
-        for (abi in ALL_ABIS.filter { it in selectedAbis }) {
+        // Device profile sweep: use each selected device's FULL properties (from Spoof Manager).
+        // This is more accurate than overriding ABI/density on native device props because Play
+        // uses the full device fingerprint when deciding which splits to serve.
+        val allDeviceProfiles = spoofProvider.availableSpoofDeviceProperties
+        val selectedDeviceProfiles = selectedDeviceProductIds.mapNotNull { productId ->
+            allDeviceProfiles.find { it.getProperty("Build.PRODUCT") == productId }
+        }
+
+        for (deviceProps in selectedDeviceProfiles) {
             if (isStopped) break
-            collectForConfig(collectedFiles, baseProps, abi = abi, density = 640, isAnonymous = isAnonymous)
+            collectForDeviceConfig(collectedFiles, deviceProps)
             if (isAnonymous) delay(DISPENSER_DELAY_MS)
         }
 
-        // Density sweep: always use arm64-v8a so density splits are collected regardless of
-        // which ABI the user selected.
+        // Locale sweep base: arm64-v8a at high density, used as base for per-locale purchases.
         val sweepAbi = "arm64-v8a"
-        for (density in ALL_DENSITIES.filter { it in selectedDensities && it != 640 }) {
-            if (isStopped) break
-            collectForConfig(collectedFiles, baseProps, abi = sweepAbi, density = density, isAnonymous = isAnonymous)
-            if (isAnonymous) delay(DISPENSER_DELAY_MS)
-        }
+        val baseProps = NativeDeviceInfoProvider.getNativeDeviceProperties(context)
 
         // Locale sweep: Play returns at most ONE locale split per purchase call.
         // Make a dedicated call per language so every selected locale is collected.
@@ -292,7 +289,6 @@ class UniversalApksWorker @AssistedInject constructor(
                 collectForConfig(
                     collectedFiles, baseProps,
                     abi = sweepAbi, density = 640,
-                    isAnonymous = isAnonymous,
                     localeOverride = locale,
                     reuseAuth = localeBaseAuth
                 )
@@ -308,8 +304,19 @@ class UniversalApksWorker @AssistedInject constructor(
             return Result.failure()
         }
 
-        // Remove density/locale splits that weren't selected by the user
-        filterCollectedFiles(collectedFiles)
+        // Derive allowed ABI IDs from selected device profiles (union of all their Platforms).
+        // If no devices were selected, keep all ABI splits (Config 0 alone ran).
+        val allowedAbiFileIds = if (selectedDeviceProfiles.isEmpty()) {
+            ALL_ABIS.map { it.replace("-", "_") }.toSet()
+        } else {
+            selectedDeviceProfiles.flatMap { props ->
+                props.getProperty("Platforms", "").split(",")
+                    .map { it.trim().replace("-", "_") }
+            }.toSet()
+        }
+
+        // Remove ABI and locale splits not covered by selected devices / locales
+        filterCollectedFiles(collectedFiles, allowedAbiFileIds)
         Log.i(TAG, "After filter: ${collectedFiles.size} files for $packageName (${collectedFiles.keys.joinToString()})")
 
         // Step 2: Download all unique files
@@ -430,52 +437,48 @@ class UniversalApksWorker @AssistedInject constructor(
     }
 
     /**
-     * Removes config splits for ABI, density, or locale that the user did NOT select.
+     * Removes config splits for ABI or locale not covered by the selected device profiles / locales.
      *
-     * ABI: always filtered strictly — only user-selected architectures are kept.
-     *   Arm64 collected incidentally during the density sweep is removed if not selected.
-     *   If no selected ABI exists for this app, no ABI split is included (base.apk only).
+     * ABI: strictly filtered to [allowedAbiFileIds] (derived from selected device profiles' Platforms).
+     *   If the set is empty (no devices selected), all ABI splits are kept.
      *
-     * Density/Locale: smart fallback — only filtered when at least one requested item was
-     *   actually collected; otherwise whatever exists is kept so the bundle remains usable.
+     * Density: NOT filtered — each device profile already fetched the appropriate density split
+     *   for its screen. All density splits that were returned are kept.
+     *
+     * Locale: smart fallback — only filtered when at least one requested locale was collected;
+     *   otherwise whatever locale splits exist are kept so the bundle remains installable.
      *
      * Keeps base.apk, df_*.apk, and any unrecognised split type unchanged.
      */
-    private fun filterCollectedFiles(files: LinkedHashMap<String, PlayFile>) {
-        val wantedDensityLabels = selectedDensities.mapNotNull { DENSITY_LABEL[it] }.toSet()
+    private fun filterCollectedFiles(
+        files: LinkedHashMap<String, PlayFile>,
+        allowedAbiFileIds: Set<String>
+    ) {
         val allAbiFileIds = ALL_ABIS.map { it.replace("-", "_") }.toSet()
-        val selectedAbiFileIds = selectedAbis.map { it.replace("-", "_") }.toSet()
 
-        // Pre-scan to see which requested split types we actually got (used for density/locale
-        // smart-fallback: keep whatever exists if none of the requested type was returned)
-        val gotRequestedDensity = files.keys.any { name ->
-            val id = configIdFromName(name) ?: return@any false
-            id in wantedDensityLabels
-        }
-        val gotRequestedLocale = files.keys.any { name ->
+        // Locale smart-fallback: only filter locale splits when we actually got the requested ones
+        val gotRequestedLocale = selectedLocales.isNotEmpty() && files.keys.any { name ->
             val id = configIdFromName(name) ?: return@any false
             !allAbiFileIds.any { id.equals(it, ignoreCase = true) } &&
                 !DENSITY_LABEL.values.contains(id) &&
                 selectedLocales.any { loc -> id == loc || id.startsWith("${loc}_") }
         }
 
-        Log.i(TAG, "Filter state: gotDensity=$gotRequestedDensity gotLocale=$gotRequestedLocale")
+        Log.i(TAG, "Filter: allowedAbis=$allowedAbiFileIds gotLocale=$gotRequestedLocale")
 
         files.entries.removeIf { (name, _) ->
             val configId = configIdFromName(name) ?: return@removeIf false
 
             when {
-                // ABI split: always filter strictly to user selection — no fallback.
-                // If the user didn't select arm64, arm64 must not appear even if it was
-                // collected incidentally during the density sweep.
+                // ABI: strict filter — only keep ABIs provided by selected device profiles
                 allAbiFileIds.any { configId.equals(it, ignoreCase = true) } ->
-                    selectedAbiFileIds.none { configId.equals(it, ignoreCase = true) }
+                    allowedAbiFileIds.isNotEmpty() &&
+                        allowedAbiFileIds.none { configId.equals(it, ignoreCase = true) }
 
-                // Density split: filter only when we got at least one requested density
-                DENSITY_LABEL.values.any { it == configId } ->
-                    gotRequestedDensity && configId !in wantedDensityLabels
+                // Density: keep everything — device profiles already selected appropriate densities
+                DENSITY_LABEL.values.any { it == configId } -> false
 
-                // Locale split: filter only when we got at least one requested locale
+                // Locale: smart fallback
                 selectedLocales.isNotEmpty() ->
                     gotRequestedLocale && selectedLocales.none { locale ->
                         configId == locale || configId.startsWith("${locale}_")
@@ -571,21 +574,57 @@ class UniversalApksWorker @AssistedInject constructor(
         }
 
     /**
-     * Builds an AuthData for [abi] + [density] (+ optional [localeOverride]) device config
-     * and purchases splits. Results are merged into [collected] (deduplicated by file name).
+     * Purchases splits using a full device profile [deviceProps] from the Spoof Manager.
+     * Results are merged into [collected] (deduplicated by file name).
      *
-     * Play API returns at most ONE locale split per purchase — the best match for the device's
-     * Locales property. To collect splits for multiple languages, call this function once per
-     * locale with [localeOverride] set to the target language code.
-     * When [localeOverride] is null the device's native locale applies (used for ABI/density
-     * sweeps where locale splits are not the goal).
+     * Using full device profiles (rather than manually overriding just ABI/density on native
+     * device props) is more accurate: Play uses the full device fingerprint to decide which
+     * splits to serve.
+     */
+    private suspend fun collectForDeviceConfig(
+        collected: LinkedHashMap<String, PlayFile>,
+        deviceProps: Properties
+    ) {
+        val label = deviceProps.getProperty("UserReadableName")
+            ?: deviceProps.getProperty("Build.PRODUCT")
+            ?: "unknown device"
+        runCatching {
+            val authData = authProvider.buildAuthDataWithProperties(accountId, deviceProps)
+            val purchaseHelper = PurchaseHelper(authData).using(httpClient)
+            val files = if (isPAndAbove && PackageUtil.isInstalled(context, packageName)) {
+                purchaseHelper.purchase(
+                    packageName, versionCode, offerType,
+                    CertUtil.getEncodedCertificateHashes(context, packageName).lastOrNull() ?: ""
+                )
+            } else {
+                purchaseHelper.purchase(packageName, versionCode, offerType)
+            }
+            val newFiles = files.filter { it.url.isNotBlank() }
+                .filter { includeDfs || !it.name.startsWith("df_") }
+                .filterNot { collected.containsKey(it.name) }
+            newFiles.forEach { collected[it.name] = it }
+            Log.i(TAG, "Device [$label]: got ${files.size} files, ${newFiles.size} new")
+        }.onFailure {
+            Log.w(TAG, "Device [$label] failed: ${it.message}")
+        }
+    }
+
+    /**
+     * Purchases splits for [localeOverride] using [abi] + [density] device config.
+     * Play returns at most ONE locale split per purchase, so this is called once per language.
+     *
+     * [reuseAuth] avoids a dispenser call per locale for anonymous accounts: build ONE base auth
+     * via [authProvider.buildAuthDataWithProperties] then pass it here for all per-locale calls.
+     *
+     * The [localeOverride] is passed BOTH as the `Locales` property AND as the `locale` param to
+     * [AuthHelper.build] — both must match or Play ignores the locale property and falls back to
+     * whatever the auth was originally issued for (the spoof locale).
      */
     private suspend fun collectForConfig(
         collected: LinkedHashMap<String, PlayFile>,
         baseProps: Properties,
         abi: String,
         density: Int,
-        isAnonymous: Boolean,
         localeOverride: String? = null,
         reuseAuth: AuthData? = null
     ) {
@@ -598,13 +637,15 @@ class UniversalApksWorker @AssistedInject constructor(
                 setProperty("Screen.Density", density.toString())
                 if (localeOverride != null) setProperty("Locales", localeOverride)
             }
-            // Reuse an existing auth token when provided (avoids a dispenser call per locale).
-            // buildAuthDataReusingToken() calls AuthHelper.build() with the same credentials but
-            // new device properties — no HTTP call to the dispenser.
+            // Pass the target locale to AuthHelper so Play returns splits for that language,
+            // not for whatever the spoof locale is set to.
+            val localeObj = localeOverride?.let {
+                runCatching { Locale.forLanguageTag(it) }.getOrNull()
+            }
             val authData = if (reuseAuth != null) {
-                authProvider.buildAuthDataReusingToken(reuseAuth, props)
+                authProvider.buildAuthDataReusingToken(reuseAuth, props, locale = localeObj)
             } else {
-                authProvider.buildAuthDataWithProperties(accountId, props)
+                authProvider.buildAuthDataWithProperties(accountId, props, locale = localeObj)
             }
             val purchaseHelper = PurchaseHelper(authData).using(httpClient)
             val files = if (isPAndAbove && PackageUtil.isInstalled(context, packageName)) {

@@ -39,6 +39,7 @@ import com.aurora.store.data.model.PlexusReport
 import com.aurora.store.data.model.Report
 import com.aurora.store.data.model.Scores
 import com.aurora.store.data.providers.AuthProvider
+import com.aurora.store.data.providers.SpoofProvider
 import com.aurora.store.data.room.download.Download
 import com.aurora.store.data.room.favourite.Favourite
 import com.aurora.store.data.room.favourite.FavouriteDao
@@ -84,7 +85,8 @@ class AppDetailsViewModel @Inject constructor(
     private val reviewDao: ReviewDao,
     private val httpClient: IHttpClient,
     private val json: Json,
-    private val accountRepository: AccountRepository
+    private val accountRepository: AccountRepository,
+    private val spoofProvider: SpoofProvider
 ) : ViewModel() {
 
     private val _app = MutableStateFlow<App?>(null)
@@ -326,6 +328,9 @@ class AppDetailsViewModel @Inject constructor(
         }
     }
 
+    /** Device profiles from the Spoof Manager, passed to [UniversalApksConfigSheet]. */
+    val availableDevices get() = spoofProvider.availableSpoofDeviceProperties
+
     val accounts = accountRepository.accounts
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
@@ -341,8 +346,7 @@ class AppDetailsViewModel @Inject constructor(
 
     fun enqueueUniversalApks(
         app: App,
-        abis: Set<String>,
-        densities: Set<Int>,
+        deviceProductIds: Set<String>,
         locales: Set<String>,
         includeDynamicFeatures: Boolean
     ) {
@@ -350,7 +354,7 @@ class AppDetailsViewModel @Inject constructor(
             val accountId = accountRepository.resolveAccountId(app.packageName)
             UniversalApksWorker.enqueue(
                 context, app, accountId,
-                abis, densities, locales, includeDynamicFeatures
+                deviceProductIds, locales, includeDynamicFeatures
             )
         }
     }

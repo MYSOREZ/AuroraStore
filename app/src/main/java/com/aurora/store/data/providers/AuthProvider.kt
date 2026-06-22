@@ -33,6 +33,7 @@ import com.aurora.store.R
 import com.aurora.store.data.AccountRepository
 import com.aurora.store.data.model.AccountType
 import com.aurora.store.data.model.Auth
+import java.util.Locale
 import java.util.Properties
 import com.aurora.store.data.room.account.Account
 import com.aurora.store.util.Preferences
@@ -120,8 +121,10 @@ class AuthProvider @Inject constructor(
      */
     suspend fun buildAuthDataWithProperties(
         accountId: String,
-        properties: Properties
+        properties: Properties,
+        locale: Locale? = null
     ): AuthData = withContext(Dispatchers.IO) {
+        val effectiveLocale = locale ?: spoofProvider.locale
         val account = accountRepository.getById(accountId)
             ?: throw IllegalStateException("No account $accountId")
         when (account.type) {
@@ -133,7 +136,7 @@ class AuthProvider @Inject constructor(
                     token = token,
                     tokenType = account.tokenType,
                     properties = properties,
-                    locale = spoofProvider.locale
+                    locale = effectiveLocale
                 )
             }
             AccountType.ANONYMOUS -> {
@@ -152,7 +155,7 @@ class AuthProvider @Inject constructor(
                     tokenType = AuthHelper.Token.AUTH,
                     isAnonymous = true,
                     properties = properties,
-                    locale = spoofProvider.locale
+                    locale = effectiveLocale
                 )
             }
         }
@@ -167,7 +170,12 @@ class AuthProvider @Inject constructor(
      * via [buildAuthDataWithProperties] (one dispenser call for anonymous accounts), then call
      * this per language to avoid per-locale dispenser calls.
      */
-    fun buildAuthDataReusingToken(baseAuthData: AuthData, properties: Properties): AuthData {
+    fun buildAuthDataReusingToken(
+        baseAuthData: AuthData,
+        properties: Properties,
+        locale: Locale? = null
+    ): AuthData {
+        val effectiveLocale = locale ?: spoofProvider.locale
         val hasAasToken = baseAuthData.aasToken.isNotBlank()
         val tokenType = if (hasAasToken) AuthHelper.Token.AAS else AuthHelper.Token.AUTH
         val token = if (hasAasToken) baseAuthData.aasToken else baseAuthData.authToken
@@ -177,7 +185,7 @@ class AuthProvider @Inject constructor(
             tokenType = tokenType,
             isAnonymous = !hasAasToken,
             properties = properties,
-            locale = spoofProvider.locale
+            locale = effectiveLocale
         )
     }
 
