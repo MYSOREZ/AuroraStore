@@ -69,7 +69,6 @@ import com.aurora.store.compose.preview.ThemePreviewProvider
 import com.aurora.store.compose.ui.details.composable.UniversalApksConfigSheet
 import com.aurora.store.data.model.AppState
 import com.aurora.store.viewmodel.details.AppDetailsViewModel
-import java.util.Properties
 import kotlinx.coroutines.android.awaitFrame
 import kotlinx.coroutines.launch
 
@@ -102,10 +101,9 @@ fun ManualDownloadScreen(
         topAppBarTitle = topAppBarTitle,
         currentVersionCode = app!!.versionCode,
         onRequestInstall = { versionCode -> onRequestInstall(buildRequestedApp(versionCode)) },
-        availableDevices = viewModel.availableDevices,
-        onRequestUniversalApks = { versionCode, deviceProductIds, locales, includeDfs ->
+        onRequestUniversalApks = { versionCode, abis, densities, locales, includeDfs ->
             viewModel.enqueueUniversalApks(
-                buildRequestedApp(versionCode), deviceProductIds, locales, includeDfs
+                buildRequestedApp(versionCode), abis, densities, locales, includeDfs
             )
             context.toast(R.string.universal_apks_gathering)
         }
@@ -117,9 +115,8 @@ private fun ScreenContent(
     state: AppState = AppState.Unavailable,
     topAppBarTitle: String? = null,
     currentVersionCode: Long = 0L,
-    availableDevices: List<Properties> = emptyList(),
     onRequestInstall: (versionCode: Long) -> Unit = {},
-    onRequestUniversalApks: ((versionCode: Long, deviceProductIds: Set<String>, locales: Set<String>, includeDfs: Boolean) -> Unit)? = null,
+    onRequestUniversalApks: ((versionCode: Long, abis: Set<String>, densities: Set<Int>, locales: Set<String>, includeDfs: Boolean) -> Unit)? = null,
     windowAdaptiveInfo: WindowAdaptiveInfo = currentWindowAdaptiveInfoV2()
 ) {
     val activity = LocalActivity.current as? ComponentActivity
@@ -143,11 +140,10 @@ private fun ScreenContent(
     if (showUniversalApksSheet && onRequestUniversalApks != null) {
         val vc = versionCode.text.toLongOrNull() ?: currentVersionCode
         UniversalApksConfigSheet(
-            availableDevices = availableDevices,
             onDismiss = { showUniversalApksSheet = false },
-            onDownload = { deviceProductIds, locales, includeDfs ->
+            onDownload = { abis, densities, locales, includeDfs ->
                 showUniversalApksSheet = false
-                onRequestUniversalApks(vc, deviceProductIds, locales, includeDfs)
+                onRequestUniversalApks(vc, abis, densities, locales, includeDfs)
             }
         )
     }

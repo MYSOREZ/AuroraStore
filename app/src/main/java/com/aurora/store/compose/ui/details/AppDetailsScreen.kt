@@ -116,7 +116,6 @@ import com.aurora.store.util.PackageUtil
 import com.aurora.store.util.ShortcutManagerUtil
 import com.aurora.store.viewmodel.details.AppDetailsViewModel
 import com.jakewharton.processphoenix.ProcessPhoenix
-import java.util.Properties
 import kotlinx.coroutines.launch
 
 @Composable
@@ -199,9 +198,8 @@ fun AppDetailsScreen(
                     onDownloadWith = { requestedApp, accountId ->
                         viewModel.enqueueDownloadWith(requestedApp, accountId)
                     },
-                    availableDevices = viewModel.availableDevices,
-                    onUniversalApks = { requestedApp, deviceProductIds, locales, includeDfs ->
-                        viewModel.enqueueUniversalApks(requestedApp, deviceProductIds, locales, includeDfs)
+                    onUniversalApks = { requestedApp, abis, densities, locales, includeDfs ->
+                        viewModel.enqueueUniversalApks(requestedApp, abis, densities, locales, includeDfs)
                         context.toast(R.string.universal_apks_gathering)
                     },
                     onFavorite = { viewModel.toggleFavourite(loadedApp) },
@@ -309,10 +307,9 @@ private fun ScreenContentApp(
     onNavigateTo: (Destination) -> Unit = {},
     onLoadMoreCluster: (cluster: StreamCluster) -> Unit = {},
     accounts: List<Account> = emptyList(),
-    availableDevices: List<Properties> = emptyList(),
     onDownload: (requestedApp: App) -> Unit = {},
     onDownloadWith: (requestedApp: App, accountId: String) -> Unit = { _, _ -> },
-    onUniversalApks: (requestedApp: App, deviceProductIds: Set<String>, locales: Set<String>, includeDfs: Boolean) -> Unit = { _, _, _, _ -> },
+    onUniversalApks: (requestedApp: App, abis: Set<String>, densities: Set<Int>, locales: Set<String>, includeDfs: Boolean) -> Unit = { _, _, _, _, _ -> },
     onFavorite: () -> Unit = {},
     onCancelDownload: () -> Unit = {},
     onUninstall: () -> Unit = {},
@@ -407,11 +404,10 @@ private fun ScreenContentApp(
 
     if (showUniversalApksSheet) {
         UniversalApksConfigSheet(
-            availableDevices = availableDevices,
             onDismiss = { showUniversalApksSheet = false },
-            onDownload = { deviceProductIds, locales, includeDfs ->
+            onDownload = { abis, densities, locales, includeDfs ->
                 showUniversalApksSheet = false
-                onUniversalApks(app, deviceProductIds, locales, includeDfs)
+                onUniversalApks(app, abis, densities, locales, includeDfs)
             }
         )
     }

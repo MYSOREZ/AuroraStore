@@ -593,8 +593,8 @@
     </plurals>
 
     <string name="action_download_universal_apks">Скачать универсальный APKS</string>
-    <string name="universal_apks_section_devices">Устройства</string>
-    <string name="universal_apks_no_devices">Профили устройств не найдены. Добавьте их в Менеджере подмены.</string>
+    <string name="universal_apks_section_architecture">Архитектура</string>
+    <string name="universal_apks_section_density">Плотность экрана</string>
     <string name="universal_apks_section_locales">Языки</string>
     <string name="universal_apks_section_extras">Дополнительно</string>
     <string name="universal_apks_include_dynamic_features">Включить модули динамических функций (df_*)</string>

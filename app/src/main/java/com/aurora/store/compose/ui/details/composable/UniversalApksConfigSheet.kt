@@ -37,40 +37,31 @@ import androidx.compose.ui.res.dimensionResource
 import androidx.compose.ui.res.stringResource
 import com.aurora.store.R
 import com.aurora.store.compose.composable.SectionHeader
-import java.util.Properties
 
 /**
- * Bottom sheet for configuring a Universal APKS bundle before downloading.
+ * Bottom sheet that lets the user choose which APK splits to include in the
+ * Universal APKS bundle before starting the download.
  *
- * Shows device profiles from the Spoof Manager so the user can pick which devices to sweep
- * (each device profile = one purchase request with that device's full properties). Also lets
- * the user choose target locales and whether to include dynamic feature modules.
- *
- * [availableDevices] comes from [SpoofProvider.availableSpoofDeviceProperties]; each entry has
- * `UserReadableName`, `Build.PRODUCT`, and `Platforms` (comma-separated ABIs).
+ * @param onDismiss Called when the sheet is dismissed without starting a download
+ * @param onDownload Called with the user's selections when the Download button is tapped
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun UniversalApksConfigSheet(
-    availableDevices: List<Properties>,
     onDismiss: () -> Unit,
     onDownload: (
-        deviceProductIds: Set<String>,
+        abis: Set<String>,
+        densities: Set<Int>,
         locales: Set<String>,
         includeDynamicFeatures: Boolean
     ) -> Unit
 ) {
-    // Default: pick one representative device per unique primary-ABI group so the user gets
-    // common splits without selecting every single device in the list.
-    val defaultSelected = remember(availableDevices) {
-        availableDevices
-            .groupBy { it.getProperty("Platforms", "").split(",").firstOrNull()?.trim() ?: "" }
-            .values
-            .mapNotNull { group -> group.firstOrNull()?.getProperty("Build.PRODUCT") }
-            .toSet()
+    var selectedAbis by remember {
+        mutableStateOf(setOf("arm64-v8a", "armeabi-v7a"))
     }
-
-    var selectedDeviceProductIds by remember(availableDevices) { mutableStateOf(defaultSelected) }
+    var selectedDensities by remember {
+        mutableStateOf(ALL_DENSITIES.map { it.first }.toSet())
+    }
     var selectedLocales by remember { mutableStateOf(setOf("en")) }
     var includeDfs by remember { mutableStateOf(true) }
 
@@ -83,38 +74,47 @@ fun UniversalApksConfigSheet(
                 .fillMaxWidth()
                 .verticalScroll(rememberScrollState())
         ) {
-            // Devices
-            SectionHeader(title = stringResource(R.string.universal_apks_section_devices))
-            if (availableDevices.isEmpty()) {
-                Text(
-                    text = stringResource(R.string.universal_apks_no_devices),
-                    style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.padding(horizontal = dimensionResource(R.dimen.spacing_medium))
-                )
-            } else {
-                FlowRow(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = dimensionResource(R.dimen.spacing_medium)),
-                    horizontalArrangement = Arrangement.spacedBy(dimensionResource(R.dimen.spacing_xsmall))
-                ) {
-                    availableDevices.forEach { deviceProps ->
-                        val productId = deviceProps.getProperty("Build.PRODUCT") ?: return@forEach
-                        val name = deviceProps.getProperty("UserReadableName") ?: productId
-                        val abis = deviceProps.getProperty("Platforms", "")
-                            .split(",").map { it.trim() }.filter { it.isNotBlank() }
-                        val chipLabel = if (abis.isNotEmpty()) "$name (${abis.joinToString()})" else name
-                        FilterChip(
-                            selected = productId in selectedDeviceProductIds,
-                            onClick = {
-                                selectedDeviceProductIds = if (productId in selectedDeviceProductIds)
-                                    selectedDeviceProductIds - productId
-                                else
-                                    selectedDeviceProductIds + productId
-                            },
-                            label = { Text(chipLabel) }
-                        )
-                    }
+            // Architecture
+            SectionHeader(title = stringResource(R.string.universal_apks_section_architecture))
+            FlowRow(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = dimensionResource(R.dimen.spacing_medium)),
+                horizontalArrangement = Arrangement.spacedBy(dimensionResource(R.dimen.spacing_xsmall))
+            ) {
+                ALL_ABIS.forEach { abi ->
+                    FilterChip(
+                        selected = abi in selectedAbis,
+                        onClick = {
+                            selectedAbis = if (abi in selectedAbis) selectedAbis - abi
+                            else selectedAbis + abi
+                        },
+                        label = { Text(abi) }
+                    )
+                }
+            }
+
+            HorizontalDivider(
+                modifier = Modifier.padding(vertical = dimensionResource(R.dimen.spacing_xsmall))
+            )
+
+            // Screen density
+            SectionHeader(title = stringResource(R.string.universal_apks_section_density))
+            FlowRow(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = dimensionResource(R.dimen.spacing_medium)),
+                horizontalArrangement = Arrangement.spacedBy(dimensionResource(R.dimen.spacing_xsmall))
+            ) {
+                ALL_DENSITIES.forEach { (dpi, label) ->
+                    FilterChip(
+                        selected = dpi in selectedDensities,
+                        onClick = {
+                            selectedDensities = if (dpi in selectedDensities)
+                                selectedDensities - dpi else selectedDensities + dpi
+                        },
+                        label = { Text(label) }
+                    )
                 }
             }
 
@@ -173,9 +173,9 @@ fun UniversalApksConfigSheet(
                         horizontal = dimensionResource(R.dimen.spacing_medium),
                         vertical = dimensionResource(R.dimen.spacing_small)
                     ),
-                enabled = selectedDeviceProductIds.isNotEmpty() || availableDevices.isEmpty(),
+                enabled = selectedAbis.isNotEmpty(),
                 onClick = {
-                    onDownload(selectedDeviceProductIds, selectedLocales, includeDfs)
+                    onDownload(selectedAbis, selectedDensities, selectedLocales, includeDfs)
                 }
             ) {
                 Text(stringResource(R.string.action_download_universal_apks))
@@ -185,6 +185,18 @@ fun UniversalApksConfigSheet(
         }
     }
 }
+
+private val ALL_ABIS = listOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86", "armeabi")
+
+private val ALL_DENSITIES = listOf(
+    640 to "xxxhdpi",
+    480 to "xxhdpi",
+    320 to "xhdpi",
+    240 to "hdpi",
+    160 to "mdpi",
+    120 to "ldpi",
+    213 to "tvdpi"
+)
 
 private val COMMON_LOCALES = listOf(
     "en" to "EN",
