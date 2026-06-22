@@ -37,19 +37,19 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: app-vanilla-debug
-          path: app/build/outputs/apk/vanilla/debug/app-vanilla-debug.apk
+          path: app/build/outputs/apk/vanilla/debug/*.apk
           retention-days: 14
 
       - name: Upload nightly APK
         uses: actions/upload-artifact@v4
         with:
           name: app-vanilla-nightly
-          path: app/build/outputs/apk/vanilla/nightly/app-vanilla-nightly.apk
+          path: app/build/outputs/apk/vanilla/nightly/*.apk
           retention-days: 14
 
       - name: Upload release APK
         uses: actions/upload-artifact@v4
         with:
           name: app-vanilla-release
-          path: app/build/outputs/apk/vanilla/release/app-vanilla-release.apk
+          path: app/build/outputs/apk/vanilla/release/*.apk
           retention-days: 14
